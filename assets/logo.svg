@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 260" role="img" aria-labelledby="title desc">
+  <title id="title">BRIDA Distribuidora</title>
+  <desc id="desc">Logotipo da BRIDA Distribuidora em azul escuro e laranja.</desc>
+  <rect width="640" height="260" fill="#ffffff"/>
+
+  <g fill="#242a68">
+    <path d="M66 38h26l22 35v126c0 14 7 22 21 22h19c19 0 28-11 28-32v-17c0-20-10-31-29-31h-39v-29h42c38 0 58 20 58 57v22c0 41-22 63-62 63h-28c-39 0-58-19-58-58V38z"/>
+    <path d="M232 91h37v24c12-18 28-27 49-27 37 0 57 24 57 68v28c0 44-20 69-57 69-20 0-36-8-49-24v21h-37V91zm69 29c-20 0-32 14-32 36v24c0 22 12 37 32 37 21 0 35-15 35-41v-16c0-26-14-40-35-40z"/>
+    <path d="M396 92h37v159h-37V92z"/>
+    <path d="M460 171c0-50 30-83 77-83 49 0 78 32 78 83 0 50-29 82-78 82-47 0-77-32-77-82zm39 0c0 29 14 46 38 46 25 0 39-17 39-46s-14-47-39-47c-24 0-38 18-38 47z"/>
+  </g>
+
+  <path d="M103 38l-27 0 0 70 27 0 -15-23z" fill="#f46f12"/>
+  <circle cx="280" cy="58" r="23" fill="#f46f12"/>
+
+  <text x="421" y="236" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="42" font-weight="700" fill="#f46f12">DISTRIBUIDORA</text>
+</svg>
