@@ -15,7 +15,6 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 import streamlit as st
-import streamlit.components.v1 as components
 
 BASE_DIR = Path(__file__).resolve().parent
 FIXED_LOGO_PATH = BASE_DIR / "baixados.png"
@@ -234,6 +233,27 @@ def find_xml_text_by_localname(node: ET.Element, local_names: list[str]) -> str:
             if text:
                 return text
     return ""
+
+
+def format_product_description(descricao: object, codigo: object, markdown_bold: bool = False) -> str:
+    descricao_text = str(descricao or "").strip()
+    codigo_text = str(codigo or "").strip()
+
+    if not codigo_text:
+        return descricao_text
+
+    codigo_display = f"**{codigo_text}**" if markdown_bold else codigo_text
+    if descricao_text:
+        return f"{descricao_text} - ({codigo_display})"
+    return f"({codigo_display})"
+
+
+def has_formatted_product_code(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized_text = " ".join(text.split())
+    return bool(re.search(r" - \([^()]+\)$", normalized_text))
 
 
 def format_datetime_display(value: datetime | None = None) -> str:
@@ -467,14 +487,14 @@ def parse_xml_file(uploaded_xml) -> dict[str, object]:
     raw_items = []
     total_quantity = 0.0
 
-    for det in root.findall(".//nfe:det", NFE_NAMESPACE):
-        quantity = parse_float(xml_text(det, "./nfe:prod/nfe:qCom", "0"))
+    for det in root.findall(".//{*}det"):
+        quantity = parse_float(find_xml_text_by_localname(det, ["qCom"]) or "0")
         raw_items.append(
             {
-                "cProd": xml_text(det, "./nfe:prod/nfe:cProd"),
-                "Descricao": xml_text(det, "./nfe:prod/nfe:xProd"),
+                "cProd": find_xml_text_by_localname(det, ["cProd"]),
+                "Descricao": find_xml_text_by_localname(det, ["xProd"]),
                 "Qtd": quantity,
-                "Unidade": xml_text(det, "./nfe:prod/nfe:uCom"),
+                "Unidade": find_xml_text_by_localname(det, ["uCom"]),
             }
         )
         total_quantity += quantity
@@ -516,6 +536,7 @@ def build_minuta_records(dataframe: pd.DataFrame) -> list[dict[str, object]]:
         produtos = [
             {
                 "descricao": str(row["Descricao"] or "").strip(),
+                "codigo": str(row["cProd"] or "").strip(),
                 "qtd": parse_float(row["Qtd"]),
                 "un": str(row["Unidade"] or "").strip(),
                 "peso": parse_float(row["Peso"]),
@@ -591,6 +612,40 @@ def generate_minuta_pdf(
         for line in lines:
             pdf.drawString(x_pos, text_y, line)
             text_y -= line_height
+
+    def wrap_product_description(produto: dict[str, object]) -> list[str]:
+        descricao = format_product_description(produto.get("descricao", ""), produto.get("codigo", ""))
+        return wrap_text(descricao, mono_font, 10, product_columns["descricao"]["width"] - 14)
+
+    def draw_product_description(x_pos: float, y_top: float, produto: dict[str, object]) -> None:
+        descricao = format_product_description(produto.get("descricao", ""), produto.get("codigo", ""))
+        descricao_lines = wrap_text(descricao, mono_font, 10, product_columns["descricao"]["width"] - 14)
+        codigo = str(produto.get("codigo", "") or "").strip()
+
+        for index, line in enumerate(descricao_lines):
+            text_y = y_top - (index * line_height)
+            prefix = "• " if index == 0 else "  "
+            pdf.setFont(mono_font, 10)
+            pdf.drawString(x_pos, text_y, prefix)
+
+            current_x = x_pos + pdf.stringWidth(prefix, mono_font, 10)
+            if codigo and codigo in line:
+                before, _, after = line.rpartition(codigo)
+                if before:
+                    pdf.setFont(mono_font, 10)
+                    pdf.drawString(current_x, text_y, before)
+                    current_x += pdf.stringWidth(before, mono_font, 10)
+
+                pdf.setFont(mono_bold_font, 10)
+                pdf.drawString(current_x, text_y, codigo)
+                current_x += pdf.stringWidth(codigo, mono_bold_font, 10)
+
+                if after:
+                    pdf.setFont(mono_font, 10)
+                    pdf.drawString(current_x, text_y, after)
+            else:
+                pdf.setFont(mono_font, 10)
+                pdf.drawString(current_x, text_y, line)
 
     def draw_right_aligned(
         x_pos: float,
@@ -696,7 +751,7 @@ def generate_minuta_pdf(
             return block_height + 10
 
         for produto in produtos:
-            descricao_lines = wrap_text(produto.get("descricao", ""), mono_font, 10, product_columns["descricao"]["width"] - 14)
+            descricao_lines = wrap_product_description(produto)
             block_height += max(14, len(descricao_lines) * line_height) + product_row_padding
 
         return block_height + 8
@@ -752,13 +807,12 @@ def generate_minuta_pdf(
             current_y -= 18
         else:
             for produto in produtos:
-                descricao_lines = wrap_text(produto.get("descricao", ""), mono_font, 10, product_columns["descricao"]["width"] - 14)
+                descricao_lines = wrap_product_description(produto)
                 product_height = max(14, len(descricao_lines) * line_height) + product_row_padding
                 current_y = ensure_space(current_y, product_height + 12)
 
                 row_top = current_y - 8
-                prefixed_lines = [f"• {descricao_lines[0]}", *[f"  {line}" for line in descricao_lines[1:]]]
-                draw_wrapped_text(product_columns["descricao"]["x"], row_top, prefixed_lines, mono_font, 10)
+                draw_product_description(product_columns["descricao"]["x"], row_top, produto)
                 draw_right_aligned(
                     product_columns["qtd"]["x"],
                     product_columns["qtd"]["width"],
@@ -1080,6 +1134,11 @@ def build_display_table(dataframe: pd.DataFrame) -> pd.DataFrame:
     display_df = dataframe.copy()
 
     if "Descricao" in display_df.columns:
+        if "cProd" in display_df.columns:
+            display_df["Descricao"] = display_df.apply(
+                lambda row: format_product_description(row.get("Descricao", ""), row.get("cProd", "")),
+                axis=1,
+            )
         display_df["Descricao"] = display_df["Descricao"].apply(lambda value: wrap_table_text(value, 32))
 
     if "Destinatario" in display_df.columns:
@@ -1142,14 +1201,27 @@ def style_status_cell(value: object) -> str:
     )
 
 
+def style_description_cell(value: object) -> str:
+    if has_formatted_product_code(value):
+        return "font-weight: 700"
+    return ""
+
+
 def build_status_styler(dataframe: pd.DataFrame):
-    if dataframe.empty or "Status" not in dataframe.columns:
+    if dataframe.empty:
         return dataframe
 
-    return (
-        dataframe.style.map(style_status_cell, subset=["Status"])
-        .set_properties(subset=["Status"], **{"text-align": "center"})
-    )
+    styler = dataframe.style
+
+    if "Status" in dataframe.columns:
+        styler = styler.map(style_status_cell, subset=["Status"]).set_properties(
+            subset=["Status"], **{"text-align": "center"}
+        )
+
+    if "Descricao" in dataframe.columns:
+        styler = styler.map(style_description_cell, subset=["Descricao"])
+
+    return styler
 
 
 def render_info_card(title: str, value: object, icon_key: str, secondary: str = "") -> None:
@@ -1187,218 +1259,6 @@ def render_section_heading(label: str, icon_key: str) -> None:
     <div class="section-title-block with-icon">{render_label_icon(ICON_MAP[icon_key])}<span>{label}</span></div>
     ''',
         unsafe_allow_html=True,
-    )
-
-
-def render_print_button(pdf_bytes: bytes) -> None:
-    if not pdf_bytes:
-        components.html(
-            f'''
-<html>
-<head>
-    <style>
-        body {{
-            margin: 0;
-            background: transparent;
-            font-family: "Segoe UI", sans-serif;
-        }}
-        .print-action-button {{
-            width: 100%;
-            min-height: 42px;
-            padding: 0 1rem;
-            border-radius: 10px;
-            border: 0;
-            background: #9AA8B8;
-            color: #FFFFFF;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 0.45rem;
-            font-size: 0.96rem;
-            font-weight: 500;
-            cursor: not-allowed;
-            box-sizing: border-box;
-        }}
-        .ui-icon {{
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 16px;
-            min-width: 16px;
-            height: 16px;
-            color: #FFFFFF;
-        }}
-        .ui-icon svg {{
-            width: 16px;
-            height: 16px;
-            stroke: currentColor;
-            stroke-width: 1.7;
-            fill: none;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }}
-    </style>
-</head>
-<body>
-    <button type="button" class="print-action-button" disabled>
-        {render_label_icon(ICON_MAP["print"])}
-        <span>Imprimir</span>
-    </button>
-</body>
-</html>
-''',
-            height=48,
-        )
-        return
-
-    pdf_base64 = base64.b64encode(pdf_bytes).decode("ascii")
-
-    components.html(
-        f'''
-<html>
-<head>
-    <style>
-        body {{
-            margin: 0;
-            background: transparent;
-            font-family: "Segoe UI", sans-serif;
-        }}
-        .print-action-button {{
-            width: 100%;
-            min-height: 42px;
-            padding: 0 1rem;
-            border-radius: 10px;
-            border: 0;
-            background: #1F3A5F;
-            color: #FFFFFF;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 0.45rem;
-            font-size: 0.96rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: background-color 0.15s ease;
-            box-sizing: border-box;
-        }}
-        .print-action-button:hover {{
-            background: #25486E;
-        }}
-        .print-action-button.is-loading {{
-            background: #35597D;
-            cursor: wait;
-        }}
-        .ui-icon {{
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 16px;
-            min-width: 16px;
-            height: 16px;
-            color: #FFFFFF;
-        }}
-        .ui-icon svg {{
-            width: 16px;
-            height: 16px;
-            stroke: currentColor;
-            stroke-width: 1.7;
-            fill: none;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }}
-    </style>
-</head>
-<body>
-    <button id="print-minuta-button" type="button" class="print-action-button">
-        {render_label_icon(ICON_MAP["print"])}
-        <span id="print-minuta-label">Imprimir</span>
-    </button>
-
-    <script>
-        const printButton = document.getElementById("print-minuta-button");
-        const labelElement = document.getElementById("print-minuta-label");
-        const pdfBase64 = "{pdf_base64}";
-
-        function restorePrintButton() {{
-            printButton.disabled = false;
-            printButton.classList.remove("is-loading");
-            labelElement.textContent = "Imprimir";
-        }}
-
-        printButton.addEventListener("click", () => {{
-            if (!pdfBase64) {{
-                return;
-            }}
-
-            printButton.disabled = true;
-            printButton.classList.add("is-loading");
-            labelElement.textContent = "Preparando impressao...";
-
-            const printWindow = window.open("", "_blank");
-
-            if (!printWindow) {{
-                restorePrintButton();
-                return;
-            }}
-
-            const pdfDataUri = `data:application/pdf;base64,${{pdfBase64}}`;
-            const printDocument = `<!doctype html>
-<html lang="pt-BR">
-<head>
-    <meta charset="utf-8">
-    <title>Minuta de Carregamento</title>
-    <style>
-        html, body {{
-            margin: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background: #101828;
-        }}
-        iframe {{
-            width: 100%;
-            height: 100%;
-            border: 0;
-        }}
-    </style>
-</head>
-<body>
-    <iframe id="minuta-pdf-frame" src="${{pdfDataUri}}"></iframe>
-    <script>
-        const pdfFrame = document.getElementById("minuta-pdf-frame");
-        const triggerPrint = () => {{
-            setTimeout(() => {{
-                try {{
-                    if (pdfFrame.contentWindow) {{
-                        pdfFrame.contentWindow.focus();
-                        pdfFrame.contentWindow.print();
-                        return;
-                    }}
-                }} catch (error) {{
-                }}
-
-                window.focus();
-                window.print();
-            }}, 350);
-        }};
-
-        pdfFrame.addEventListener("load", triggerPrint, {{ once: true }});
-        window.addEventListener("afterprint", () => window.close(), {{ once: true }});
-    <\/script>
-</body>
-</html>`;
-
-            printWindow.document.open();
-            printWindow.document.write(printDocument);
-            printWindow.document.close();
-
-            setTimeout(restorePrintButton, 1400);
-        }});
-    </script>
-</body>
-</html>
-''',
-        height=48,
     )
 
 
@@ -2056,10 +1916,8 @@ def render_main_screen() -> None:
 
     with action_col_download:
         st.markdown('<div class="section-title export-title">Exportacao</div>', unsafe_allow_html=True)
-        print_col, pdf_col = st.columns(2, gap="small")
-        with print_col:
-            render_print_button(pdf_bytes)
-        with pdf_col:
+        pdf_col_left, pdf_col_right = st.columns([1.1, 1.0], gap="small")
+        with pdf_col_right:
             st.download_button(
             "Baixar PDF",
             data=pdf_bytes,
