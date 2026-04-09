@@ -3,6 +3,7 @@ from datetime import datetime
 import base64
 from io import BytesIO
 import re
+import hashlib
 import textwrap
 import unicodedata
 import xml.etree.ElementTree as ET
@@ -19,6 +20,8 @@ import streamlit as st
 BASE_DIR = Path(__file__).resolve().parent
 FIXED_LOGO_PATH = BASE_DIR / "baixados.png"
 WINDOWS_FONT_DIR = Path("C:/Windows/Fonts")
+DATA_DIR = BASE_DIR / "data"
+PRACAS_JSON_PATH = DATA_DIR / "pracas.json"
 NFE_NAMESPACE = {"nfe": "http://www.portalfiscal.inf.br/nfe"}
 DISPLAY_PROCESSING_WARNINGS = False
 TABLE_COLUMNS = [
@@ -30,8 +33,10 @@ TABLE_COLUMNS = [
     "Unidade",
     "Peso",
     "Destinatario",
+    "ROTA",
     "Status",
 ]
+UNDEFINED_ROUTE_LABEL = "NÃO DEFINIDA"
 PDF_FONT_REGULAR = "Helvetica"
 PDF_FONT_BOLD = "Helvetica-Bold"
 PDF_FONT_MONO = "Courier"
@@ -149,6 +154,85 @@ def render_floating_logo() -> None:
     """,
         unsafe_allow_html=True,
     )
+
+
+def update_pracas_json(uploaded_file) -> str:
+    try:
+        uploaded_file.seek(0)
+        pracas_df = pd.read_excel(uploaded_file)
+        uploaded_file.seek(0)
+    except Exception as exc:
+        raise ValueError(f"Erro ao ler o arquivo de pracas: {exc}") from exc
+
+    json_content = pracas_df.to_json(orient="records", force_ascii=False, date_format="iso")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    if PRACAS_JSON_PATH.exists():
+        PRACAS_JSON_PATH.unlink()
+
+    PRACAS_JSON_PATH.write_text(json_content, encoding="utf-8")
+    load_pracas_lookup.clear()
+    return "Praças atualizadas com sucesso"
+
+
+def normalize_praca_name(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"\s+", " ", text).strip().upper()
+    return text
+
+
+@st.cache_data(show_spinner=False)
+def load_pracas_lookup(json_path: str) -> dict[str, str]:
+    path = Path(json_path)
+    if not path.is_file():
+        return {}
+
+    try:
+        pracas_df = pd.read_json(path)
+    except ValueError:
+        return {}
+
+    if pracas_df.empty or "PRACA" not in pracas_df.columns or "ROTA" not in pracas_df.columns:
+        return {}
+
+    normalized_df = pracas_df[["PRACA", "ROTA"]].copy()
+    normalized_df["PRACA"] = normalized_df["PRACA"].map(normalize_praca_name)
+    normalized_df["ROTA"] = normalized_df["ROTA"].fillna(UNDEFINED_ROUTE_LABEL).astype(str).str.strip()
+    normalized_df = normalized_df[normalized_df["PRACA"] != ""]
+    normalized_df["ROTA"] = normalized_df["ROTA"].replace("", UNDEFINED_ROUTE_LABEL)
+
+    return dict(zip(normalized_df["PRACA"], normalized_df["ROTA"]))
+
+
+def apply_routes_to_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
+    updated_df = dataframe.copy()
+
+    if "ROTA" not in updated_df.columns:
+        updated_df["ROTA"] = UNDEFINED_ROUTE_LABEL
+
+    if updated_df.empty:
+        return updated_df
+
+    if "Municipio" not in updated_df.columns:
+        updated_df["ROTA"] = UNDEFINED_ROUTE_LABEL
+        return updated_df
+
+    route_lookup = load_pracas_lookup(str(PRACAS_JSON_PATH))
+    if not route_lookup:
+        updated_df["ROTA"] = UNDEFINED_ROUTE_LABEL
+        return updated_df
+
+    normalized_municipios = updated_df["Municipio"].map(normalize_praca_name)
+    updated_df["ROTA"] = normalized_municipios.map(route_lookup).fillna(UNDEFINED_ROUTE_LABEL)
+    return updated_df
 
 
 def render_label_icon(icon_name: str) -> str:
@@ -466,6 +550,7 @@ def parse_xml_file(uploaded_xml) -> dict[str, object]:
         return {
             "NF": fallback_nf_from_filename(filename),
             "Destinatario": "",
+            "Municipio": "",
             "Status": f"Erro ao ler XML: {exc}",
             "PesoTotal": 0.0,
             "Items": [],
@@ -475,6 +560,7 @@ def parse_xml_file(uploaded_xml) -> dict[str, object]:
 
     nf = normalize_nf(xml_text(root, ".//nfe:ide/nfe:nNF"))
     destinatario = xml_text(root, ".//nfe:dest/nfe:xNome")
+    municipio = xml_text(root, ".//nfe:dest/nfe:enderDest/nfe:xMun")
     status = xml_text(root, ".//nfe:protNFe/nfe:infProt/nfe:xMotivo") or "Status nao informado"
     data_emissao = extract_issue_date_from_xml(root)
 
@@ -510,6 +596,7 @@ def parse_xml_file(uploaded_xml) -> dict[str, object]:
         "NF": nf or fallback_nf_from_filename(filename),
         "Data": data_emissao,
         "Destinatario": destinatario,
+        "Municipio": municipio,
         "Status": status,
         "VolumeTotal": volume_total,
         "PesoTotal": peso_total,
@@ -556,6 +643,7 @@ def build_minuta_records(dataframe: pd.DataFrame) -> list[dict[str, object]]:
                 "nf": str(nf),
                 "data": data_emissao,
                 "cliente": cliente,
+                "rota": str(first_row.get("ROTA", UNDEFINED_ROUTE_LABEL) or UNDEFINED_ROUTE_LABEL).strip(),
                 "volume": int(volume) if volume.is_integer() else volume,
                 "peso_total": peso_total,
                 "produtos": produtos,
@@ -586,6 +674,7 @@ def generate_minuta_pdf(
     line_height = 12
     nf_row_padding = 8
     product_row_padding = 6
+    route_block_height = 20
 
     table_columns = {
         "nota": {"x": left_margin, "width": 72},
@@ -744,7 +833,7 @@ def generate_minuta_pdf(
     def compute_block_height(registro: dict[str, object]) -> float:
         cliente_lines = wrap_text(registro.get("cliente", ""), mono_font, 10, table_columns["cliente"]["width"] - 8)
         nf_row_height = max(18, len(cliente_lines) * line_height) + nf_row_padding
-        block_height = nf_row_height + 18
+        block_height = route_block_height + nf_row_height + 18
 
         produtos = registro.get("produtos", []) or []
         if not produtos:
@@ -759,16 +848,25 @@ def generate_minuta_pdf(
     current_y = draw_first_page_header()
     current_y = draw_main_table_header(current_y)
 
-    for registro in dados_minuta:
+    for index, registro in enumerate(dados_minuta):
         current_y = ensure_space(current_y, compute_block_height(registro) + 20)
 
         cliente_lines = wrap_text(registro.get("cliente", ""), mono_font, 10, table_columns["cliente"]["width"] - 8)
         nf_row_height = max(18, len(cliente_lines) * line_height) + nf_row_padding
+        route_text = f"ROTA: {str(registro.get('rota', UNDEFINED_ROUTE_LABEL) or UNDEFINED_ROUTE_LABEL).strip().upper()}"
 
-        pdf.setStrokeColor(colors.HexColor("#d7d7d7"))
-        pdf.line(left_margin, current_y + 4, right_margin, current_y + 4)
+        if index > 0:
+            pdf.setStrokeColor(colors.HexColor("#444444"))
+            pdf.setLineWidth(1.8)
+            pdf.line(left_margin, current_y + 6, right_margin, current_y + 6)
+            pdf.setLineWidth(1)
 
-        row_top = current_y - 10
+        pdf.setFillColor(colors.HexColor("#1F3A5F"))
+        pdf.setFont(bold_font, 10)
+        pdf.drawString(left_margin + 2, current_y - 8, route_text)
+
+        row_top = current_y - route_block_height - 10
+        pdf.setFillColor(colors.black)
         pdf.setFont(mono_font, 10)
         pdf.drawString(table_columns["nota"]["x"] + 2, row_top, str(registro.get("nf", "") or "--"))
         draw_centered(
@@ -780,7 +878,6 @@ def generate_minuta_pdf(
             10,
         )
         draw_wrapped_text(table_columns["cliente"]["x"] + 2, row_top, cliente_lines, mono_font, 10)
-
         volume = registro.get("volume", 0)
         volume_value = parse_float(volume)
         volume_text = str(int(volume_value)) if volume_value.is_integer() else format_quantity_display(volume_value)
@@ -794,7 +891,7 @@ def generate_minuta_pdf(
             10,
             padding_right=12,
         )
-        current_y -= nf_row_height
+        current_y -= route_block_height + nf_row_height
 
         pdf.setFont(bold_font, 10)
         pdf.drawString(left_margin + 18, current_y - 8, "• Produtos:")
@@ -844,6 +941,7 @@ def generate_minuta_pdf(
         current_y -= 6
 
     total_volume = sum(parse_float(registro.get("volume", 0)) for registro in dados_minuta)
+    total_nf = len({str(registro.get("nf", "")).strip() for registro in dados_minuta if str(registro.get("nf", "")).strip()})
     total_peso = sum(parse_float(registro.get("peso_total", 0.0)) for registro in dados_minuta)
     total_block_height = 50
     signature_block_height = 90
@@ -855,7 +953,8 @@ def generate_minuta_pdf(
     pdf.drawString(left_margin, current_y - 18, "TOTAL GERAL:")
     pdf.setFont(bold_font, 10)
     pdf.drawString(left_margin + 18, current_y - 36, f"Volumes: {format_quantity_display(total_volume)}")
-    pdf.drawString(left_margin + 170, current_y - 36, f"Peso: {format_decimal_br(total_peso)}")
+    pdf.drawString(left_margin + 190, current_y - 36, f"NF: {total_nf}")
+    pdf.drawString(left_margin + 320, current_y - 36, f"Peso: {format_decimal_br(total_peso)}")
 
     current_y -= total_block_height
 
@@ -938,6 +1037,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
                         "Peso": 0.0,
                         "PesoTotalNF": xml_data["PesoTotal"],
                         "Destinatario": xml_data["Destinatario"],
+                        "Municipio": xml_data["Municipio"],
                         "Status": str(xml_data["Status"]),
                     }
                 )
@@ -958,6 +1058,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
                         "Peso": item["Peso"],
                         "PesoTotalNF": xml_data["PesoTotal"],
                         "Destinatario": xml_data["Destinatario"],
+                        "Municipio": xml_data["Municipio"],
                         "Status": str(xml_data["Status"]),
                     }
                 )
@@ -967,6 +1068,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
             processed_df = create_empty_processed_df()
         else:
             processed_df = processed_df.sort_values(by=["Seq_sort", "NF"], ascending=[False, True], na_position="last")
+        processed_df = apply_routes_to_dataframe(processed_df)
 
         display_df = processed_df[TABLE_COLUMNS].copy()
         error_mask = ~display_df["Status"].astype(str).str.contains("autorizado", case=False, na=False)
@@ -1021,6 +1123,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
                     "Peso": 0.0,
                     "PesoTotalNF": 0.0,
                     "Destinatario": "",
+                    "Municipio": "",
                     "Status": "XML nao encontrado",
                 }
             )
@@ -1041,6 +1144,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
                     "Peso": 0.0,
                     "PesoTotalNF": xml_data["PesoTotal"],
                     "Destinatario": xml_data["Destinatario"],
+                    "Municipio": xml_data["Municipio"],
                     "Status": str(xml_data["Status"]),
                 }
             )
@@ -1061,6 +1165,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
                     "Peso": item["Peso"],
                     "PesoTotalNF": xml_data["PesoTotal"],
                     "Destinatario": xml_data["Destinatario"],
+                    "Municipio": xml_data["Municipio"],
                     "Status": str(xml_data["Status"]),
                 }
             )
@@ -1070,6 +1175,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
         processed_df = create_empty_processed_df()
     else:
         processed_df = processed_df.sort_values(by=["Seq_sort", "NF"], ascending=[False, True], na_position="last")
+    processed_df = apply_routes_to_dataframe(processed_df)
 
     display_df = processed_df[TABLE_COLUMNS].copy()
     error_mask = ~display_df["Status"].astype(str).str.contains("autorizado", case=False, na=False)
@@ -1106,7 +1212,7 @@ def create_empty_summary() -> dict[str, object]:
 
 
 def create_empty_processed_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=["Seq_sort", "Data", "Volume", "PesoTotalNF", *TABLE_COLUMNS])
+    return pd.DataFrame(columns=["Seq_sort", "Data", "Volume", "PesoTotalNF", "Municipio", *TABLE_COLUMNS])
 
 
 def build_table_column_config(dataframe: pd.DataFrame) -> dict[str, object]:
@@ -1119,6 +1225,7 @@ def build_table_column_config(dataframe: pd.DataFrame) -> dict[str, object]:
         "Unidade": st.column_config.TextColumn("UN", width="small"),
         "Peso": st.column_config.NumberColumn("Peso", format="%.3f kg", width="small"),
         "Destinatario": st.column_config.TextColumn("Destinatario", width="medium"),
+        "ROTA": st.column_config.TextColumn("ROTA", width="medium"),
         "Status": st.column_config.TextColumn("Status", width="medium"),
     }
 
@@ -1143,6 +1250,9 @@ def build_display_table(dataframe: pd.DataFrame) -> pd.DataFrame:
 
     if "Destinatario" in display_df.columns:
         display_df["Destinatario"] = display_df["Destinatario"].apply(lambda value: wrap_table_text(value, 28))
+
+    if "ROTA" in display_df.columns:
+        display_df["ROTA"] = display_df["ROTA"].apply(lambda value: wrap_table_text(value, 20))
 
     return display_df
 
@@ -1207,6 +1317,21 @@ def style_description_cell(value: object) -> str:
     return ""
 
 
+def style_route_cell(value: object) -> str:
+    if str(value or "").strip().upper() != UNDEFINED_ROUTE_LABEL:
+        return ""
+
+    return "; ".join(
+        [
+            "background-color: #FEF3C7",
+            "color: #9A3412",
+            "font-weight: 700",
+            "text-align: center",
+            "border-radius: 8px",
+        ]
+    )
+
+
 def build_status_styler(dataframe: pd.DataFrame):
     if dataframe.empty:
         return dataframe
@@ -1220,6 +1345,9 @@ def build_status_styler(dataframe: pd.DataFrame):
 
     if "Descricao" in dataframe.columns:
         styler = styler.map(style_description_cell, subset=["Descricao"])
+
+    if "ROTA" in dataframe.columns:
+        styler = styler.map(style_route_cell, subset=["ROTA"])
 
     return styler
 
@@ -1506,6 +1634,40 @@ def render_sidebar() -> tuple[list, object, bool]:
 
         st.markdown(
             f'''
+        <div class="sidebar-field-label with-icon">{render_label_icon(ICON_MAP["excel"])}<span>Atualizar Praças</span></div>
+        ''',
+            unsafe_allow_html=True,
+        )
+
+        pracas_file = st.file_uploader(
+            "Atualizar Praças",
+            type=["xlsx"],
+            accept_multiple_files=False,
+            key="pracas_upload_widget",
+        )
+
+        if pracas_file is None:
+            st.session_state.pracas_upload_signature = ""
+        else:
+            file_bytes = pracas_file.getvalue()
+            current_signature = hashlib.sha256(file_bytes).hexdigest()
+            if current_signature != st.session_state.pracas_upload_signature:
+                try:
+                    st.session_state.pracas_upload_message = update_pracas_json(pracas_file)
+                    st.session_state.pracas_upload_error = ""
+                    st.session_state.pracas_upload_signature = current_signature
+                except ValueError as exc:
+                    st.session_state.pracas_upload_message = ""
+                    st.session_state.pracas_upload_error = str(exc)
+                    st.session_state.pracas_upload_signature = ""
+
+        if st.session_state.pracas_upload_message:
+            st.success(st.session_state.pracas_upload_message)
+        if st.session_state.pracas_upload_error:
+            st.error(st.session_state.pracas_upload_error)
+
+        st.markdown(
+            f'''
         <div class="sidebar-field-label with-icon">{render_label_icon(ICON_MAP["xml"])}<span>Upload XML</span></div>
         ''',
             unsafe_allow_html=True,
@@ -1563,6 +1725,15 @@ def render_main_screen() -> None:
 
     if "document_issue_at" not in st.session_state:
         st.session_state.document_issue_at = format_datetime_display()
+
+    if "pracas_upload_signature" not in st.session_state:
+        st.session_state.pracas_upload_signature = ""
+
+    if "pracas_upload_message" not in st.session_state:
+        st.session_state.pracas_upload_message = ""
+
+    if "pracas_upload_error" not in st.session_state:
+        st.session_state.pracas_upload_error = ""
 
     login_success = st.session_state.get("login_success", "")
     if login_success:
@@ -1853,7 +2024,8 @@ def render_main_screen() -> None:
                 st.error(f"Erro inesperado ao processar os arquivos: {exc}")
 
     summary = st.session_state.summary
-    processed_df = st.session_state.processed_df.copy()
+    processed_df = apply_routes_to_dataframe(st.session_state.processed_df.copy())
+    st.session_state.processed_df = processed_df
 
     render_section_heading("Dados Gerais", "dados_gerais")
     dados_col_1, dados_col_2, dados_col_3 = st.columns(3, gap="medium")
@@ -1885,7 +2057,7 @@ def render_main_screen() -> None:
         for issue in st.session_state.issues:
             st.warning(issue)
 
-    action_col_search, action_col_download = st.columns([2.2, 1.4], gap="medium")
+    action_col_search, action_col_download = st.columns([2.0, 1.8], gap="medium")
 
     with action_col_search:
         st.markdown('<div class="section-title">Localizar registros</div>', unsafe_allow_html=True)
@@ -1916,15 +2088,15 @@ def render_main_screen() -> None:
 
     with action_col_download:
         st.markdown('<div class="section-title export-title">Exportacao</div>', unsafe_allow_html=True)
-        pdf_col_left, pdf_col_right = st.columns([1.1, 1.0], gap="small")
+        pdf_col_left, pdf_col_right = st.columns([1.0, 1.1], gap="small")
         with pdf_col_right:
             st.download_button(
-            "Baixar PDF",
-            data=pdf_bytes,
-            file_name=f"minuta_carregamento_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-            disabled=not bool(pdf_bytes),
+                "Baixar PDF",
+                data=pdf_bytes,
+                file_name=f"minuta_carregamento_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                disabled=not bool(pdf_bytes),
             )
 
     st.markdown("### Painel de Notas e Itens")
