@@ -1,0 +1,74 @@
+[
+  {
+    "chave_nfe":"35260400846804000106550010014076461454550142",
+    "numero_nf":"1407646",
+    "data_emissao":"10\/04\/2026",
+    "produto":"M-SUPER 3000 EURO DIESEL 5W30 24X1L",
+    "quantidade":5.0,
+    "unidade":"CX",
+    "peso":102.0,
+    "cliente":"D.A. COMERCIO DE LUBRIFICANTES LTDA",
+    "municipio":"Santa Isabel",
+    "status_nf":"Autorizado o uso da NF-e"
+  },
+  {
+    "chave_nfe":"",
+    "numero_nf":"1407825",
+    "data_emissao":"",
+    "produto":"",
+    "quantidade":0.0,
+    "unidade":"",
+    "peso":0.0,
+    "cliente":"",
+    "municipio":"",
+    "status_nf":"XML nao encontrado"
+  },
+  {
+    "chave_nfe":"35260400846804000106550010014077161167778105",
+    "numero_nf":"1407716",
+    "data_emissao":"10\/04\/2026",
+    "produto":"M-DELVAC MODERN 15W40 SD V3 4X4L",
+    "quantidade":10.0,
+    "unidade":"CX",
+    "peso":174.1460674157,
+    "cliente":"DISTRIBUIDORA PAI MULT PECAS LTDA EPP",
+    "municipio":"Taubate",
+    "status_nf":"Autorizado o uso da NF-e"
+  },
+  {
+    "chave_nfe":"35260400846804000106550010014077161167778105",
+    "numero_nf":"1407716",
+    "data_emissao":"10\/04\/2026",
+    "produto":"M-DELVAC MODERN 15W40 SD V3 24X1L",
+    "quantidade":10.0,
+    "unidade":"CX",
+    "peso":174.1460674157,
+    "cliente":"DISTRIBUIDORA PAI MULT PECAS LTDA EPP",
+    "municipio":"Taubate",
+    "status_nf":"Autorizado o uso da NF-e"
+  },
+  {
+    "chave_nfe":"35260400846804000106550010014077161167778105",
+    "numero_nf":"1407716",
+    "data_emissao":"10\/04\/2026",
+    "produto":"M-DELVAC LEGEND 15W40 PROTECTION 20L",
+    "quantidade":150.0,
+    "unidade":"BB",
+    "peso":2612.191011236,
+    "cliente":"DISTRIBUIDORA PAI MULT PECAS LTDA EPP",
+    "municipio":"Taubate",
+    "status_nf":"Autorizado o uso da NF-e"
+  },
+  {
+    "chave_nfe":"35260400846804000106550010014077161167778105",
+    "numero_nf":"1407716",
+    "data_emissao":"10\/04\/2026",
+    "produto":"M-SUPER 3000 EURO DIESEL 5W30 4X4L",
+    "quantidade":8.0,
+    "unidade":"CX",
+    "peso":139.3168539326,
+    "cliente":"DISTRIBUIDORA PAI MULT PECAS LTDA EPP",
+    "municipio":"Taubate",
+    "status_nf":"Autorizado o uso da NF-e"
+  }
+]

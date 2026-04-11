@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import datetime
 import base64
 from io import BytesIO
+import json
 import re
 import hashlib
 import textwrap
@@ -22,8 +23,10 @@ FIXED_LOGO_PATH = BASE_DIR / "baixados.png"
 WINDOWS_FONT_DIR = Path("C:/Windows/Fonts")
 DATA_DIR = BASE_DIR / "data"
 PRACAS_JSON_PATH = DATA_DIR / "pracas.json"
+XMLS_PROCESSADOS_JSON_PATH = DATA_DIR / "xmls_processados.json"
 NFE_NAMESPACE = {"nfe": "http://www.portalfiscal.inf.br/nfe"}
 DISPLAY_PROCESSING_WARNINGS = False
+NF_DEBUG_COLUMNS = ["NF Planilha", "NF XML", "Tipo XML", "Arquivo XML", "Correspondencia"]
 TABLE_COLUMNS = [
     "Seq",
     "NF",
@@ -235,6 +238,16 @@ def apply_routes_to_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
     return updated_df
 
 
+def get_route_for_municipio(value: object) -> str:
+    normalized = normalize_praca_name(value)
+    if not normalized:
+        return UNDEFINED_ROUTE_LABEL
+    route_lookup = load_pracas_lookup(str(PRACAS_JSON_PATH))
+    if not route_lookup:
+        return UNDEFINED_ROUTE_LABEL
+    return route_lookup.get(normalized, UNDEFINED_ROUTE_LABEL)
+
+
 def render_label_icon(icon_name: str) -> str:
     return f'<span class="ui-icon" aria-hidden="true">{ICON_SVG[icon_name]}</span>'
 
@@ -253,8 +266,46 @@ def normalize_nf(value: object) -> str:
     text = str(value).strip()
     if not text:
         return ""
+    text = re.sub(r"\s+", "", text)
+    if re.fullmatch(r"\d+[\.,]\d+", text):
+        text = re.split(r"[\.,]", text, maxsplit=1)[0]
     digits = re.sub(r"\D", "", text)
-    return digits or text
+    if not digits:
+        return ""
+    digits = digits.lstrip("0")
+    return digits or "0"
+
+
+def xml_local_name(tag: str) -> str:
+    return tag.split("}", 1)[-1] if "}" in tag else tag
+
+
+def normalize_chave_nfe(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    digits = re.sub(r"\D", "", str(value).strip())
+    return digits if len(digits) == 44 else ""
+
+
+def extract_nf_from_chave(chave_nfe: str) -> str:
+    if len(chave_nfe) != 44 or not chave_nfe.isdigit():
+        return ""
+    return normalize_nf(chave_nfe[25:34])
+
+
+def detect_xml_type(root: ET.Element) -> str:
+    root_name = xml_local_name(root.tag).lower()
+    if "evento" in root_name:
+        return "evento"
+    if find_xml_text_by_localname(root, ["tpEvento", "descEvento", "chNFe"]) and not find_xml_text_by_localname(root, ["nNF"]):
+        return "evento"
+    return "normal"
+
+
+def should_replace_xml(current_xml: dict[str, object], new_xml: dict[str, object]) -> bool:
+    current_type = str(current_xml.get("TipoXML", "normal"))
+    new_type = str(new_xml.get("TipoXML", "normal"))
+    return current_type == "evento" and new_type == "normal"
 
 
 def parse_float(value: object) -> float:
@@ -503,6 +554,7 @@ def load_excel_base(uploaded_excel) -> pd.DataFrame:
     if nf_column:
         filtered_df = metadata_df.copy()
         filtered_df["NF"] = base_df[nf_column].apply(normalize_nf)
+        filtered_df["nf_normalizada"] = filtered_df["NF"]
         filtered_df = filtered_df[filtered_df["NF"] != ""].copy()
 
         if filtered_df.empty:
@@ -529,6 +581,14 @@ def xml_text(node: ET.Element, path: str, default: str = "") -> str:
     return found.text.strip()
 
 
+def xml_text_any_namespace(node: ET.Element, path: str, default: str = "") -> str:
+    found = node.find(path)
+    if found is None or found.text is None:
+        return default
+    text = found.text.strip()
+    return text or default
+
+
 def fallback_nf_from_filename(filename: str) -> str:
     digits = re.findall(r"\d+", filename)
     return digits[-1] if digits else ""
@@ -549,6 +609,7 @@ def parse_xml_file(uploaded_xml) -> dict[str, object]:
     except Exception as exc:
         return {
             "NF": fallback_nf_from_filename(filename),
+            "ChaveNFe": "",
             "Destinatario": "",
             "Municipio": "",
             "Status": f"Erro ao ler XML: {exc}",
@@ -556,12 +617,19 @@ def parse_xml_file(uploaded_xml) -> dict[str, object]:
             "Items": [],
             "Arquivo": filename,
             "Erro": True,
+            "TipoXML": "desconhecido",
+            "nf_normalizada": normalize_nf(fallback_nf_from_filename(filename)),
         }
 
-    nf = normalize_nf(xml_text(root, ".//nfe:ide/nfe:nNF"))
-    destinatario = xml_text(root, ".//nfe:dest/nfe:xNome")
-    municipio = xml_text(root, ".//nfe:dest/nfe:enderDest/nfe:xMun")
-    status = xml_text(root, ".//nfe:protNFe/nfe:infProt/nfe:xMotivo") or "Status nao informado"
+    xml_type = detect_xml_type(root)
+    ch_nfe = normalize_chave_nfe(find_xml_text_by_localname(root, ["chNFe"]))
+    nf = normalize_nf(find_xml_text_by_localname(root, ["nNF"])) or extract_nf_from_chave(ch_nfe)
+    emitente = xml_text_any_namespace(root, ".//{*}emit/{*}xNome")
+    destinatario = xml_text_any_namespace(root, ".//{*}dest/{*}xNome", "DESTINATARIO NAO INFORMADO")
+    if emitente and normalize_label(destinatario) == normalize_label(emitente):
+        destinatario = "ERRO: DESTINATARIO INCORRETO"
+    municipio = xml_text_any_namespace(root, ".//{*}dest/{*}enderDest/{*}xMun") or find_xml_text_by_localname(root, ["xMun"])
+    status = find_xml_text_by_localname(root, ["xMotivo"]) or "Status nao informado"
     data_emissao = extract_issue_date_from_xml(root)
 
     volume_total = 0.0
@@ -594,6 +662,8 @@ def parse_xml_file(uploaded_xml) -> dict[str, object]:
 
     return {
         "NF": nf or fallback_nf_from_filename(filename),
+        "nf_normalizada": nf or normalize_nf(fallback_nf_from_filename(filename)),
+        "ChaveNFe": ch_nfe,
         "Data": data_emissao,
         "Destinatario": destinatario,
         "Municipio": municipio,
@@ -603,6 +673,7 @@ def parse_xml_file(uploaded_xml) -> dict[str, object]:
         "Items": items,
         "Arquivo": filename,
         "Erro": False,
+        "TipoXML": xml_type,
     }
 
 
@@ -975,27 +1046,142 @@ def build_xml_index(xml_files: list) -> tuple[dict[str, dict[str, object]], list
 
     for xml_file in xml_files:
         xml_data = parse_xml_file(xml_file)
-        nf = str(xml_data.get("NF", "")).strip()
+        nf = normalize_nf(xml_data.get("nf_normalizada", "") or xml_data.get("NF", ""))
 
         if not nf:
             issues.append(f"XML sem NF identificavel: {xml_data.get('Arquivo', 'arquivo.xml')}")
             continue
 
         if nf in xml_index:
+            current_xml = xml_index[nf]
+            if should_replace_xml(current_xml, xml_data):
+                issues.append(f"NF {nf} encontrada em XML de evento e XML normal. Foi mantido o XML normal.")
+                xml_index[nf] = xml_data
+                continue
+            if should_replace_xml(xml_data, current_xml):
+                issues.append(f"NF {nf} encontrada em XML normal e XML de evento. Foi mantido o XML normal.")
+                continue
             issues.append(f"NF {nf} duplicada nos XMLs. Foi mantido o ultimo arquivo enviado.")
 
         if xml_data.get("Erro"):
             issues.append(f"Erro no XML {xml_data.get('Arquivo', 'arquivo.xml')}: {xml_data.get('Status', '')}")
+            continue
 
         xml_index[nf] = xml_data
 
     return xml_index, issues
 
 
-def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd.DataFrame, dict[str, object], list[str]]:
+def serialize_xml_record(xml_data: dict[str, object]) -> dict[str, object]:
+    items = []
+    for item in xml_data.get("Items", []) or []:
+        items.append(
+            {
+                "cProd": str(item.get("cProd", "") or "").strip(),
+                "Descricao": str(item.get("Descricao", "") or "").strip(),
+                "Qtd": parse_float(item.get("Qtd", 0.0)),
+                "Unidade": str(item.get("Unidade", "") or "").strip(),
+                "Peso": parse_float(item.get("Peso", 0.0)),
+            }
+        )
+
+    municipio = str(xml_data.get("Municipio", "") or "").strip()
+    return {
+        "NF": normalize_nf(xml_data.get("NF", "") or xml_data.get("nf_normalizada", "")),
+        "nf_normalizada": normalize_nf(xml_data.get("nf_normalizada", "") or xml_data.get("NF", "")),
+        "ChaveNFe": normalize_chave_nfe(xml_data.get("ChaveNFe", "")),
+        "Data": str(xml_data.get("Data", "") or "").strip(),
+        "Destinatario": str(xml_data.get("Destinatario", "") or "").strip(),
+        "Municipio": municipio,
+        "Status": str(xml_data.get("Status", "") or "").strip(),
+        "VolumeTotal": parse_float(xml_data.get("VolumeTotal", 0.0)),
+        "PesoTotal": parse_float(xml_data.get("PesoTotal", 0.0)),
+        "Items": items,
+        "Arquivo": str(xml_data.get("Arquivo", "") or "").strip(),
+        "Erro": bool(xml_data.get("Erro", False)),
+        "TipoXML": str(xml_data.get("TipoXML", "normal") or "normal").strip(),
+        "ROTA": str(xml_data.get("ROTA", "") or get_route_for_municipio(municipio)).strip(),
+    }
+
+
+def build_xml_index_from_records(xml_records: list[dict[str, object]]) -> tuple[dict[str, dict[str, object]], list[str]]:
+    xml_index: dict[str, dict[str, object]] = {}
+    issues: list[str] = []
+
+    for xml_record in xml_records or []:
+        normalized_record = serialize_xml_record(xml_record)
+        nf = normalize_nf(normalized_record.get("nf_normalizada", "") or normalized_record.get("NF", ""))
+
+        if not nf:
+            issues.append("Registro salvo sem NF identificavel foi ignorado.")
+            continue
+
+        xml_index[nf] = normalized_record
+
+    return xml_index, issues
+
+
+def resolve_xml_source(xml_source: object) -> tuple[dict[str, dict[str, object]], list[str]]:
+    if not xml_source:
+        return {}, []
+
+    if isinstance(xml_source, list) and xml_source:
+        first_item = xml_source[0]
+        if isinstance(first_item, dict):
+            return build_xml_index_from_records(xml_source)
+        return build_xml_index(xml_source)
+
+    return {}, []
+
+
+def salvar_xmls_processados_json(xml_files: list) -> tuple[int, int, list[str]]:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     xml_index, issues = build_xml_index(xml_files or [])
+    serialized_records = [serialize_xml_record(xml_data) for xml_data in xml_index.values()]
+
+    XMLS_PROCESSADOS_JSON_PATH.write_text(
+        json.dumps(serialized_records, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    carregar_xmls_processados_json.clear()
+    return len(xml_index), max(0, len(xml_files or []) - len(xml_index)), issues
+
+
+@st.cache_data(show_spinner=False)
+def carregar_xmls_processados_json(json_path: str) -> tuple[list[dict[str, object]], str]:
+    path = Path(json_path)
+    if not path.is_file():
+        return [], ""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return [], f"Os XMLs salvos no sistema nao puderam ser lidos ({exc}). Envie novos arquivos para atualizar a base."
+
+    if not isinstance(payload, list):
+        return [], "Os XMLs salvos no sistema estao em formato invalido. Envie novos arquivos para atualizar a base."
+
+    try:
+        records = [serialize_xml_record(item) for item in payload if isinstance(item, dict)]
+    except Exception as exc:
+        return [], f"Os XMLs salvos no sistema estao corrompidos ({exc}). Envie novos arquivos para atualizar a base."
+
+    return records, ""
+
+
+def get_xml_storage_status() -> tuple[bool, str]:
+    if not XMLS_PROCESSADOS_JSON_PATH.is_file():
+        return False, ""
+
+    updated_at = datetime.fromtimestamp(XMLS_PROCESSADOS_JSON_PATH.stat().st_mtime)
+    return True, format_datetime_display(updated_at)
+
+
+def integrate_excel_with_xml(base_df: pd.DataFrame, xml_source: object) -> tuple[pd.DataFrame, dict[str, object], list[str], list[dict[str, str]]]:
+    xml_index, issues = resolve_xml_source(xml_source)
     issues.extend(base_df.attrs.get("issues", []))
     rows: list[dict[str, object]] = []
+    debug_rows: list[dict[str, str]] = []
     integration_mode = base_df.attrs.get("integration_mode", "excel_nf")
 
     if integration_mode == "xml_base":
@@ -1027,6 +1213,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
                     {
                         "Seq": seq_value,
                         "Seq_sort": seq_sort,
+                        "ChaveNFe": xml_data["ChaveNFe"],
                         "NF": xml_data["NF"],
                         "Data": xml_data["Data"],
                         "cProd": "",
@@ -1048,6 +1235,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
                     {
                         "Seq": seq_value,
                         "Seq_sort": seq_sort,
+                        "ChaveNFe": xml_data["ChaveNFe"],
                         "NF": xml_data["NF"],
                         "Data": xml_data["Data"],
                         "cProd": item["cProd"],
@@ -1087,15 +1275,15 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
             "error_count": int(display_df.loc[error_mask, "NF"].nunique()),
         }
 
-        return processed_df, summary, issues
+        return processed_df, summary, issues, debug_rows
 
-    excel_nfs = set(base_df["NF"].astype(str).tolist()) if "NF" in base_df.columns else set()
+    excel_nfs = set(base_df["nf_normalizada"].astype(str).tolist()) if "nf_normalizada" in base_df.columns else set()
     xml_nfs = set(xml_index.keys())
 
     unmatched_xml_nfs = sorted(xml_nfs - excel_nfs)
     missing_xml_nfs = sorted(excel_nfs - xml_nfs)
 
-    if xml_files and not (excel_nfs & xml_nfs):
+    if xml_source and not (excel_nfs & xml_nfs):
         issues.append("Nenhum XML enviado corresponde as NFs presentes no Excel.")
 
     if unmatched_xml_nfs:
@@ -1106,13 +1294,25 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
 
     for row in base_df.to_dict(orient="records"):
         nf = row["NF"]
-        xml_data = xml_index.get(nf)
+        nf_normalizada = normalize_nf(row.get("nf_normalizada", nf))
+        xml_data = xml_index.get(nf_normalizada)
+
+        debug_rows.append(
+            {
+                "NF Planilha": str(nf),
+                "NF XML": str(xml_data.get("nf_normalizada", "")) if xml_data else "",
+                "Tipo XML": str(xml_data.get("TipoXML", "")) if xml_data else "",
+                "Arquivo XML": str(xml_data.get("Arquivo", "")) if xml_data else "",
+                "Correspondencia": "OK" if xml_data else "XML nao encontrado",
+            }
+        )
 
         if not xml_data:
             rows.append(
                 {
                     "Seq": row["Seq"],
                     "Seq_sort": row["Seq_sort"],
+                    "ChaveNFe": "",
                     "NF": nf,
                     "Data": "",
                     "cProd": "",
@@ -1134,6 +1334,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
                 {
                     "Seq": row["Seq"],
                     "Seq_sort": row["Seq_sort"],
+                    "ChaveNFe": xml_data["ChaveNFe"],
                     "NF": nf,
                     "Data": xml_data["Data"],
                     "cProd": "",
@@ -1155,6 +1356,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
                 {
                     "Seq": row["Seq"],
                     "Seq_sort": row["Seq_sort"],
+                    "ChaveNFe": xml_data["ChaveNFe"],
                     "NF": nf,
                     "Data": xml_data["Data"],
                     "cProd": item["cProd"],
@@ -1194,7 +1396,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_files: list) -> tuple[pd
         "error_count": int(display_df.loc[error_mask, "NF"].nunique()),
     }
 
-    return processed_df, summary, issues
+    return processed_df, summary, issues, debug_rows
 
 
 def create_empty_summary() -> dict[str, object]:
@@ -1212,7 +1414,11 @@ def create_empty_summary() -> dict[str, object]:
 
 
 def create_empty_processed_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=["Seq_sort", "Data", "Volume", "PesoTotalNF", "Municipio", *TABLE_COLUMNS])
+    return pd.DataFrame(columns=["Seq_sort", "ChaveNFe", "Data", "Volume", "PesoTotalNF", "Municipio", *TABLE_COLUMNS])
+
+
+def create_empty_nf_debug_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=NF_DEBUG_COLUMNS)
 
 
 def build_table_column_config(dataframe: pd.DataFrame) -> dict[str, object]:
@@ -1627,6 +1833,17 @@ def render_sidebar() -> tuple[list, object, bool]:
     with st.sidebar:
         st.markdown(
             f'''
+        <div class="sidebar-heading with-icon">{render_label_icon(ICON_MAP["dados_gerais"])}<span>Navegacao</span></div>
+        ''',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("**Tela**")
+        st.caption("Minuta de Carregamento")
+        st.session_state["tela_atual"] = "minuta"
+
+        st.markdown(
+            f'''
         <div class="sidebar-heading with-icon">{render_label_icon(ICON_MAP["dados_gerais"])}<span>Arquivos</span></div>
         ''',
             unsafe_allow_html=True,
@@ -1677,7 +1894,40 @@ def render_sidebar() -> tuple[list, object, bool]:
             "Selecionar XMLs",
             type=["xml"],
             accept_multiple_files=True,
+            key="xml_upload_widget",
         )
+
+        xml_records, xml_storage_error = carregar_xmls_processados_json(str(XMLS_PROCESSADOS_JSON_PATH))
+
+        if xml_files:
+            upload_signature_parts: list[str] = []
+            for uploaded_file in xml_files:
+                file_bytes = uploaded_file.getvalue()
+                upload_signature_parts.append(f"{uploaded_file.name}:{hashlib.sha256(file_bytes).hexdigest()}")
+
+            current_signature = hashlib.sha256("|".join(upload_signature_parts).encode("utf-8")).hexdigest()
+            if current_signature != st.session_state.xml_upload_signature or not XMLS_PROCESSADOS_JSON_PATH.is_file():
+                valid_files, ignored_files, issues = salvar_xmls_processados_json(xml_files)
+                xml_records, xml_storage_error = carregar_xmls_processados_json(str(XMLS_PROCESSADOS_JSON_PATH))
+                st.session_state.xml_upload_signature = current_signature
+                st.session_state.xml_upload_message = (
+                    f"Base de XMLs atualizada: {valid_files} validos, {ignored_files} ignorados"
+                )
+                st.session_state.xml_upload_error = ""
+                st.session_state.xml_upload_issues = issues
+
+        has_xml_storage, xml_updated_at = get_xml_storage_status()
+        if st.session_state.xml_upload_message:
+            st.success(st.session_state.xml_upload_message)
+        if xml_storage_error:
+            st.warning(xml_storage_error)
+        elif has_xml_storage:
+            st.caption(f"Dados carregados do sistema • Ultima atualizacao: {xml_updated_at}")
+
+        if st.session_state.get("xml_upload_issues"):
+            with st.expander("Detalhes dos XMLs", expanded=False):
+                for issue in st.session_state.xml_upload_issues:
+                    st.warning(issue)
 
         st.markdown(
             f'''
@@ -1693,9 +1943,129 @@ def render_sidebar() -> tuple[list, object, bool]:
 
         process_clicked = st.button("Processar", use_container_width=True)
 
-    return xml_files, excel_file, process_clicked
+    return xml_records, excel_file, process_clicked
 
 
+def render_processing_screen(process_clicked: bool, xml_records: list, excel_file) -> None:
+    if process_clicked:
+        if excel_file is None:
+            st.error("Envie um arquivo Excel para iniciar o processamento.")
+        else:
+            try:
+                excel_base = load_excel_base(excel_file)
+                processed_df, summary, issues, nf_debug = integrate_excel_with_xml(excel_base, xml_records or [])
+                st.session_state.processed_df = processed_df
+                st.session_state.summary = summary
+                st.session_state.issues = issues
+                st.session_state.nf_debug = pd.DataFrame(nf_debug, columns=NF_DEBUG_COLUMNS)
+                st.session_state.document_issue_at = format_datetime_display()
+
+                if processed_df.empty:
+                    st.warning("Nenhum dado foi processado. Verifique se o Excel possui NFs validas.")
+                else:
+                    st.success("Processamento concluido.")
+            except ValueError as exc:
+                st.session_state.processed_df = create_empty_processed_df()
+                st.session_state.summary = create_empty_summary()
+                st.session_state.issues = []
+                st.session_state.nf_debug = create_empty_nf_debug_df()
+                st.error(str(exc))
+            except Exception as exc:
+                st.session_state.processed_df = create_empty_processed_df()
+                st.session_state.summary = create_empty_summary()
+                st.session_state.issues = []
+                st.session_state.nf_debug = create_empty_nf_debug_df()
+                st.error(f"Erro inesperado ao processar os arquivos: {exc}")
+
+    summary = st.session_state.summary
+    processed_df = apply_routes_to_dataframe(st.session_state.processed_df.copy())
+    st.session_state.processed_df = processed_df
+
+    render_section_heading("Dados Gerais", "dados_gerais")
+    dados_col_1, dados_col_2, dados_col_3 = st.columns(3, gap="medium")
+    with dados_col_1:
+        render_info_card("Filial", summary["filial"], "filial")
+    with dados_col_2:
+        render_info_card("Carregamento", summary["numero_carga"], "carregamento")
+    with dados_col_3:
+        render_info_card("Data Saida", summary["data_saida"], "data_saida")
+
+    dados_col_4, dados_col_5 = st.columns(2, gap="medium")
+    with dados_col_4:
+        render_info_card("Motorista", summary["motorista"], "motorista")
+    with dados_col_5:
+        render_info_card("Placa", summary["placa"], "placa")
+
+    render_section_heading("Resumo da Carga", "resumo_carga")
+    resumo_col_1, resumo_col_2, resumo_col_3, resumo_col_4 = st.columns(4, gap="medium")
+    with resumo_col_1:
+        render_metric_card("NF", summary["nf_count"], "nf")
+    with resumo_col_2:
+        render_metric_card("Peso", f"{summary['peso_total'] / 1000:.3f} t", "peso")
+    with resumo_col_3:
+        render_metric_card("Itens", summary["item_count"], "itens")
+    with resumo_col_4:
+        render_metric_card("Erros", summary["error_count"], "erros")
+
+    if DISPLAY_PROCESSING_WARNINGS and st.session_state.issues:
+        for issue in st.session_state.issues:
+            st.warning(issue)
+
+    if not st.session_state.nf_debug.empty:
+        with st.expander("Debug de correspondencia NF x XML", expanded=False):
+            st.dataframe(st.session_state.nf_debug, use_container_width=True, hide_index=True)
+
+    action_col_search, action_col_download = st.columns([2.0, 1.8], gap="medium")
+
+    with action_col_search:
+        st.markdown('<div class="section-title">Localizar registros</div>', unsafe_allow_html=True)
+        search_term = st.text_input("Pesquisar (qualquer coluna)", placeholder="Buscar NF, produto, destinatario ou status")
+
+    if search_term and not processed_df.empty:
+        filtered_df = processed_df[
+            processed_df.astype(str).apply(
+                lambda column: column.str.contains(search_term, case=False, na=False)
+            ).any(axis=1)
+        ]
+    else:
+        filtered_df = processed_df
+
+    display_df = build_display_table(filtered_df[TABLE_COLUMNS].copy())
+    styled_display_df = build_status_styler(display_df)
+
+    minuta_records = build_minuta_records(processed_df)
+    pdf_bytes = b""
+    if minuta_records:
+        pdf_bytes = generate_minuta_pdf(
+            dados_minuta=minuta_records,
+            numero_carga=str(summary.get("numero_carga", "--") or "--"),
+            data_emissao=str(st.session_state.document_issue_at or "--"),
+            veiculo=str(summary.get("placa", "--") or "--"),
+            motorista=str(summary.get("motorista", "--") or "--"),
+        )
+
+    with action_col_download:
+        st.markdown('<div class="section-title export-title">Exportacao</div>', unsafe_allow_html=True)
+        pdf_col_left, pdf_col_right = st.columns([1.0, 1.1], gap="small")
+        with pdf_col_right:
+            st.download_button(
+                "Baixar PDF",
+                data=pdf_bytes,
+                file_name=f"minuta_carregamento_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                disabled=not bool(pdf_bytes),
+            )
+
+    st.markdown("### Painel de Notas e Itens")
+    st.caption("Visualizacao consolidada da carga com detalhamento operacional por nota fiscal.")
+    st.dataframe(
+        styled_display_df,
+        width="stretch",
+        hide_index=True,
+        column_config=build_table_column_config(display_df),
+        row_height=56,
+    )
 def render_main_screen() -> None:
     if "menu_aberto" not in st.session_state:
         st.session_state["menu_aberto"] = True
@@ -1723,6 +2093,9 @@ def render_main_screen() -> None:
     if "issues" not in st.session_state:
         st.session_state.issues = []
 
+    if "nf_debug" not in st.session_state:
+        st.session_state.nf_debug = create_empty_nf_debug_df()
+
     if "document_issue_at" not in st.session_state:
         st.session_state.document_issue_at = format_datetime_display()
 
@@ -1734,6 +2107,21 @@ def render_main_screen() -> None:
 
     if "pracas_upload_error" not in st.session_state:
         st.session_state.pracas_upload_error = ""
+
+    if "xml_upload_signature" not in st.session_state:
+        st.session_state.xml_upload_signature = ""
+
+    if "xml_upload_message" not in st.session_state:
+        st.session_state.xml_upload_message = ""
+
+    if "xml_upload_error" not in st.session_state:
+        st.session_state.xml_upload_error = ""
+
+    if "xml_upload_issues" not in st.session_state:
+        st.session_state.xml_upload_issues = []
+
+    if "tela_atual" not in st.session_state:
+        st.session_state["tela_atual"] = "minuta"
 
     login_success = st.session_state.get("login_success", "")
     if login_success:
@@ -1990,124 +2378,14 @@ def render_main_screen() -> None:
         unsafe_allow_html=True,
     )
 
-    xml_files = []
+    xml_records = []
     excel_file = None
     process_clicked = False
     if st.session_state["menu_aberto"]:
-        xml_files, excel_file, process_clicked = render_sidebar()
+        xml_records, excel_file, process_clicked = render_sidebar()
 
-    if process_clicked:
-        if excel_file is None:
-            st.error("Envie um arquivo Excel para iniciar o processamento.")
-        else:
-            try:
-                excel_base = load_excel_base(excel_file)
-                processed_df, summary, issues = integrate_excel_with_xml(excel_base, xml_files or [])
-                st.session_state.processed_df = processed_df
-                st.session_state.summary = summary
-                st.session_state.issues = issues
-                st.session_state.document_issue_at = format_datetime_display()
-
-                if processed_df.empty:
-                    st.warning("Nenhum dado foi processado. Verifique se o Excel possui NFs validas.")
-                else:
-                    st.success("Processamento concluido.")
-            except ValueError as exc:
-                st.session_state.processed_df = create_empty_processed_df()
-                st.session_state.summary = create_empty_summary()
-                st.session_state.issues = []
-                st.error(str(exc))
-            except Exception as exc:
-                st.session_state.processed_df = create_empty_processed_df()
-                st.session_state.summary = create_empty_summary()
-                st.session_state.issues = []
-                st.error(f"Erro inesperado ao processar os arquivos: {exc}")
-
-    summary = st.session_state.summary
-    processed_df = apply_routes_to_dataframe(st.session_state.processed_df.copy())
-    st.session_state.processed_df = processed_df
-
-    render_section_heading("Dados Gerais", "dados_gerais")
-    dados_col_1, dados_col_2, dados_col_3 = st.columns(3, gap="medium")
-    with dados_col_1:
-        render_info_card("Filial", summary["filial"], "filial")
-    with dados_col_2:
-        render_info_card("Carregamento", summary["numero_carga"], "carregamento")
-    with dados_col_3:
-        render_info_card("Data Saida", summary["data_saida"], "data_saida")
-
-    dados_col_4, dados_col_5 = st.columns(2, gap="medium")
-    with dados_col_4:
-        render_info_card("Motorista", summary["motorista"], "motorista")
-    with dados_col_5:
-        render_info_card("Placa", summary["placa"], "placa")
-
-    render_section_heading("Resumo da Carga", "resumo_carga")
-    resumo_col_1, resumo_col_2, resumo_col_3, resumo_col_4 = st.columns(4, gap="medium")
-    with resumo_col_1:
-        render_metric_card("NF", summary["nf_count"], "nf")
-    with resumo_col_2:
-        render_metric_card("Peso", f"{summary['peso_total'] / 1000:.3f} t", "peso")
-    with resumo_col_3:
-        render_metric_card("Itens", summary["item_count"], "itens")
-    with resumo_col_4:
-        render_metric_card("Erros", summary["error_count"], "erros")
-
-    if DISPLAY_PROCESSING_WARNINGS and st.session_state.issues:
-        for issue in st.session_state.issues:
-            st.warning(issue)
-
-    action_col_search, action_col_download = st.columns([2.0, 1.8], gap="medium")
-
-    with action_col_search:
-        st.markdown('<div class="section-title">Localizar registros</div>', unsafe_allow_html=True)
-        search_term = st.text_input("Pesquisar (qualquer coluna)", placeholder="Buscar NF, produto, destinatario ou status")
-
-    if search_term and not processed_df.empty:
-        filtered_df = processed_df[
-            processed_df.astype(str).apply(
-                lambda column: column.str.contains(search_term, case=False, na=False)
-            ).any(axis=1)
-        ]
-    else:
-        filtered_df = processed_df
-
-    display_df = build_display_table(filtered_df[TABLE_COLUMNS].copy())
-    styled_display_df = build_status_styler(display_df)
-
-    minuta_records = build_minuta_records(processed_df)
-    pdf_bytes = b""
-    if minuta_records:
-        pdf_bytes = generate_minuta_pdf(
-            dados_minuta=minuta_records,
-            numero_carga=str(summary.get("numero_carga", "--") or "--"),
-            data_emissao=str(st.session_state.document_issue_at or "--"),
-            veiculo=str(summary.get("placa", "--") or "--"),
-            motorista=str(summary.get("motorista", "--") or "--"),
-        )
-
-    with action_col_download:
-        st.markdown('<div class="section-title export-title">Exportacao</div>', unsafe_allow_html=True)
-        pdf_col_left, pdf_col_right = st.columns([1.0, 1.1], gap="small")
-        with pdf_col_right:
-            st.download_button(
-                "Baixar PDF",
-                data=pdf_bytes,
-                file_name=f"minuta_carregamento_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-                disabled=not bool(pdf_bytes),
-            )
-
-    st.markdown("### Painel de Notas e Itens")
-    st.caption("Visualizacao consolidada da carga com detalhamento operacional por nota fiscal.")
-    st.dataframe(
-        styled_display_df,
-        width="stretch",
-        hide_index=True,
-        column_config=build_table_column_config(display_df),
-        row_height=56,
-    )
+    st.session_state["tela_atual"] = "minuta"
+    render_processing_screen(process_clicked, xml_records, excel_file)
 
 
 def main() -> None:
