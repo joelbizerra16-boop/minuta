@@ -9,6 +9,7 @@ import re
 import hashlib
 import textwrap
 import unicodedata
+import zipfile
 import xml.etree.ElementTree as ET
 
 import pandas as pd
@@ -24,6 +25,14 @@ from reportlab.platypus import Paragraph, Table, TableStyle
 import streamlit as st
 import streamlit.components.v1 as components
 
+from utils.gerador_minuta import generate_minuta_entrega_pdf
+from utils.minuta_carregamento import (
+    MINUTA_CARREGAMENTO_CONFIG,
+    MINUTA_ENTREGA_CONFIG,
+    MINUTA_MODULES,
+    MinutaModuleConfig,
+)
+
 BASE_DIR = Path(__file__).resolve().parent
 FIXED_LOGO_PATH = BASE_DIR / "baixados.png"
 WINDOWS_FONT_DIR = Path("C:/Windows/Fonts")
@@ -35,6 +44,35 @@ SEPARACAO_JSON_PATH = DATA_DIR / "separacao.json"
 LOTES_JSON_PATH = DATA_DIR / "lotes.json"
 SEPARACAO_EXCLUIDOS_JSON_PATH = DATA_DIR / "separacao_excluidos.json"
 NFE_NAMESPACE = {"nfe": "http://www.portalfiscal.inf.br/nfe"}
+UF_CODE_MAP = {
+    "11": "RO",
+    "12": "AC",
+    "13": "AM",
+    "14": "RR",
+    "15": "PA",
+    "16": "AP",
+    "17": "TO",
+    "21": "MA",
+    "22": "PI",
+    "23": "CE",
+    "24": "RN",
+    "25": "PB",
+    "26": "PE",
+    "27": "AL",
+    "28": "SE",
+    "29": "BA",
+    "31": "MG",
+    "32": "ES",
+    "33": "RJ",
+    "35": "SP",
+    "41": "PR",
+    "42": "SC",
+    "43": "RS",
+    "50": "MS",
+    "51": "MT",
+    "52": "GO",
+    "53": "DF",
+}
 DISPLAY_PROCESSING_WARNINGS = False
 NF_DEBUG_COLUMNS = ["NF Planilha", "NF XML", "Tipo XML", "Arquivo XML", "Correspondencia"]
 TABLE_COLUMNS = [
@@ -123,6 +161,7 @@ AUTH_QUERY_VALUE = "1"
 SCREEN_LOGIN = "login"
 SCREEN_MENU = "menu"
 SCREEN_MINUTA = "minuta"
+SCREEN_ENTREGA = "minuta_entrega"
 SCREEN_SEPARACAO = "separacao"
 SCREEN_LOTES = "lotes"
 ICON_MAP = {
@@ -415,6 +454,19 @@ def extract_nf_from_chave(chave_nfe: str) -> str:
     return normalize_nf(chave_nfe[25:34])
 
 
+def normalize_uf_value(value: object) -> str:
+    text = str(value or "").strip().upper()
+    text = re.sub(r"[^A-Z]", "", text)
+    return text[:2] if len(text) >= 2 else text
+
+
+def infer_uf_from_chave(chave_nfe: object) -> str:
+    chave = normalize_chave_nfe(chave_nfe)
+    if len(chave) != 44:
+        return ""
+    return UF_CODE_MAP.get(chave[:2], "")
+
+
 def detect_xml_type(root: ET.Element) -> str:
     root_name = xml_local_name(root.tag).lower()
     if "evento" in root_name:
@@ -433,10 +485,23 @@ def should_replace_xml(current_xml: dict[str, object], new_xml: dict[str, object
 def parse_float(value: object) -> float:
     if value is None or pd.isna(value):
         return 0.0
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
     text = str(value).strip()
     if not text:
         return 0.0
-    text = text.replace(",", ".")
+    text = text.replace("R$", "").replace(" ", "")
+    if "." in text and "," in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif text.count(",") == 1 and text.count(".") == 0:
+        text = text.replace(",", ".")
+    elif text.count(".") > 1 and text.count(",") == 0:
+        text = text.replace(".", "")
+
+    text = re.sub(r"[^0-9.-]", "", text)
     try:
         return float(text)
     except ValueError:
@@ -456,6 +521,50 @@ def find_column(columns: list[object], aliases: list[str]) -> str | None:
             return original_column
 
     return None
+
+
+def first_non_empty(*values: object) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def extract_optional_excel_columns(base_df: pd.DataFrame) -> pd.DataFrame:
+    optional_df = pd.DataFrame(index=base_df.index)
+    optional_field_aliases = {
+        "ClienteExcel": [
+            "Cliente",
+            "Destinatario",
+            "Destinatário",
+            "Razao Social",
+            "Razão Social",
+            "Nome Cliente",
+        ],
+        "CidadeExcel": ["Cidade", "Municipio", "Município", "Praca", "Praça"],
+        "UFExcel": ["UF", "Estado"],
+        "ValorExcel": ["Valor", "Valor NF", "Valor Nota", "Valor Total", "Vlr NF", "Total Nota", "Total"],
+        "PesoExcel": ["Peso", "Peso Kg", "Peso NF", "Peso Total", "Peso Bruto"],
+        "VolumeExcel": ["Volume", "Volumes", "Qtd Vol", "Quantidade Volume"],
+        "TransportadoraExcel": ["Transportadora", "Transportador", "Transportes", "Nome Transportadora"],
+        "MotoristaExcel": ["Motorista", "Nome Motorista", "Condutor"],
+        "VeiculoExcel": ["Veiculo", "Veículo", "Placa", "Caminhao", "Caminhão"],
+    }
+
+    numeric_fields = {"ValorExcel", "PesoExcel", "VolumeExcel"}
+    for field_name, aliases in optional_field_aliases.items():
+        column_name = find_column(list(base_df.columns), aliases)
+        if column_name is None:
+            optional_df[field_name] = 0.0 if field_name in numeric_fields else ""
+            continue
+
+        if field_name in numeric_fields:
+            optional_df[field_name] = base_df[column_name].apply(parse_float)
+        else:
+            optional_df[field_name] = base_df[column_name].fillna("").astype(str).str.strip()
+
+    return optional_df
 
 
 def build_default_product_classification_records() -> list[dict[str, str]]:
@@ -718,16 +827,19 @@ def summarize_metadata(base_df: pd.DataFrame) -> dict[str, str]:
     data_saida_values = [value for value in base_df["Data Saida"].astype(str).tolist() if value]
     motorista_values = [value for value in base_df["Motorista"].astype(str).tolist() if value]
     placa_values = [value for value in base_df["Placa"].astype(str).tolist() if value]
+    transportadora_values = [value for value in base_df["Transportadora"].astype(str).tolist() if value] if "Transportadora" in base_df.columns else []
     carga_values = [value for value in base_df["Numero Carga"].astype(str).tolist() if value]
 
     unique_dates = sorted(set(data_saida_values))
     unique_motoristas = sorted(set(motorista_values))
     unique_placas = sorted(set(placa_values))
+    unique_transportadoras = sorted(set(transportadora_values))
     unique_cargas = sorted(set(carga_values))
 
     return {
         "numero_carga": unique_cargas[0] if len(unique_cargas) == 1 else ("Multiplos" if unique_cargas else "--"),
         "data_saida": unique_dates[0] if len(unique_dates) == 1 else ("Multiplas" if unique_dates else "--"),
+        "transportadora": unique_transportadoras[0] if len(unique_transportadoras) == 1 else ("Multiplas" if unique_transportadoras else "BRIDA LUBRIFICANTES LTDA"),
         "motorista": unique_motoristas[0] if len(unique_motoristas) == 1 else ("Multiplos" if unique_motoristas else "--"),
         "placa": unique_placas[0] if len(unique_placas) == 1 else ("Multiplas" if unique_placas else "--"),
     }
@@ -737,8 +849,8 @@ def detect_excel_structure(uploaded_excel) -> tuple[str, int | None, int | None]
     workbook = pd.ExcelFile(uploaded_excel)
     uploaded_excel.seek(0)
 
-    overview_tokens = {"filial", "dtsaida", "data", "carga", "carregamento", "numerocarga", "motorista", "veiculo", "placa"}
-    detail_tokens = {"seqent", "numeronota", "carregamento", "numeropedido", "pesokg"}
+    overview_tokens = {"filial", "dtsaida", "data", "carga", "carregamento", "numerocarga", "motorista", "veiculo", "placa", "transportadora", "transportador"}
+    detail_tokens = {"seqent", "numeronota", "nota", "nf", "carregamento", "numeropedido", "pesokg", "cliente", "cidade", "uf", "valor", "volume"}
     best_sheet = workbook.sheet_names[0]
     best_overview_row = None
     best_detail_row = None
@@ -770,7 +882,7 @@ def detect_excel_structure(uploaded_excel) -> tuple[str, int | None, int | None]
 
 
 def extract_summary_metadata(preview_df: pd.DataFrame, overview_row: int | None) -> dict[str, str]:
-    default_metadata = {"Filial": "BRIDA", "Numero Carga": "", "Data Saida": "", "Motorista": "", "Placa": ""}
+    default_metadata = {"Filial": "BRIDA", "Numero Carga": "", "Data Saida": "", "Transportadora": "BRIDA LUBRIFICANTES LTDA", "Motorista": "", "Placa": ""}
     if overview_row is None or overview_row + 1 >= len(preview_df.index):
         return default_metadata
 
@@ -781,6 +893,7 @@ def extract_summary_metadata(preview_df: pd.DataFrame, overview_row: int | None)
     filial = str(mapping.get("filial", "BRIDA") or "BRIDA").strip()
     numero_carga = str(mapping.get("carregamento", mapping.get("carga", mapping.get("numerocarga", ""))) or "").strip()
     data_saida = format_date_series(pd.Series([mapping.get("dtsaida", mapping.get("data", ""))])).iloc[0]
+    transportadora = str(mapping.get("transportadora", mapping.get("transportador", mapping.get("transportes", "BRIDA LUBRIFICANTES LTDA"))) or "BRIDA LUBRIFICANTES LTDA").strip()
     motorista = str(mapping.get("motorista", "") or "").strip()
     placa = str(mapping.get("veiculo", mapping.get("placa", "")) or "").strip()
 
@@ -788,6 +901,7 @@ def extract_summary_metadata(preview_df: pd.DataFrame, overview_row: int | None)
         "Filial": filial,
         "Numero Carga": numero_carga,
         "Data Saida": data_saida,
+        "Transportadora": transportadora,
         "Motorista": motorista,
         "Placa": placa,
     }
@@ -807,6 +921,7 @@ def build_metadata_df(base_df: pd.DataFrame, summary_metadata: dict[str, str]) -
         metadata_df["Seq"] = range(1, len(base_df.index) + 1)
 
     metadata_df["Data Saida"] = summary_metadata.get("Data Saida", "")
+    metadata_df["Transportadora"] = summary_metadata.get("Transportadora", "BRIDA LUBRIFICANTES LTDA")
     metadata_df["Motorista"] = summary_metadata.get("Motorista", "")
     metadata_df["Placa"] = summary_metadata.get("Placa", "")
     metadata_df["Numero Carga"] = summary_metadata.get("Numero Carga", "")
@@ -848,6 +963,19 @@ def load_excel_base(uploaded_excel) -> pd.DataFrame:
 
     summary_metadata = extract_summary_metadata(preview_df, overview_row)
     metadata_df = build_metadata_df(base_df, summary_metadata)
+    metadata_df = metadata_df.join(extract_optional_excel_columns(base_df))
+    if "TransportadoraExcel" in metadata_df.columns:
+        transportadora_candidates = [value for value in metadata_df["TransportadoraExcel"].astype(str).tolist() if str(value).strip()]
+        if transportadora_candidates and summary_metadata.get("Transportadora", "BRIDA LUBRIFICANTES LTDA") == "BRIDA LUBRIFICANTES LTDA":
+            metadata_df["Transportadora"] = transportadora_candidates[0]
+    if "MotoristaExcel" in metadata_df.columns:
+        motorista_candidates = [value for value in metadata_df["MotoristaExcel"].astype(str).tolist() if str(value).strip()]
+        if motorista_candidates and not summary_metadata.get("Motorista", ""):
+            metadata_df["Motorista"] = motorista_candidates[0]
+    if "VeiculoExcel" in metadata_df.columns:
+        veiculo_candidates = [value for value in metadata_df["VeiculoExcel"].astype(str).tolist() if str(value).strip()]
+        if veiculo_candidates and not summary_metadata.get("Placa", ""):
+            metadata_df["Placa"] = veiculo_candidates[0]
     nf_column = find_column(list(base_df.columns), ["NF", "Nota Fiscal", "Numero NF", "Numero Nota", "N. NF", "Nf"])
 
     if nf_column:
@@ -942,9 +1070,15 @@ def parse_xml_file(uploaded_xml) -> dict[str, object]:
     if emitente and normalize_label(destinatario) == normalize_label(emitente):
         destinatario = "ERRO: DESTINATARIO INCORRETO"
     municipio = xml_text_any_namespace(root, ".//{*}dest/{*}enderDest/{*}xMun") or find_xml_text_by_localname(root, ["xMun"])
+    uf = xml_text_any_namespace(root, ".//{*}dest/{*}enderDest/{*}UF") or find_xml_text_by_localname(root, ["UF"])
     reference_raw, reference_datetime = extract_xml_reference_datetime(root, xml_type)
     status = extract_xml_status(root, xml_type)
     data_emissao = extract_issue_date_from_xml(root)
+    valor_total = parse_float(
+        xml_text_any_namespace(root, ".//{*}ICMSTot/{*}vNF")
+        or find_xml_text_by_localname(root, ["vNF"])
+        or "0"
+    )
 
     volume_total = 0.0
     peso_total = 0.0
@@ -983,8 +1117,10 @@ def parse_xml_file(uploaded_xml) -> dict[str, object]:
         "DataReferenciaISO": reference_datetime.isoformat() if reference_datetime else "",
         "Destinatario": destinatario,
         "Municipio": municipio,
+        "UF": str(uf or "").strip().upper(),
         "Status": status,
         "StatusNF": status,
+        "ValorNF": valor_total,
         "VolumeTotal": volume_total,
         "PesoTotal": peso_total,
         "Items": items,
@@ -1041,12 +1177,192 @@ def build_minuta_records(dataframe: pd.DataFrame) -> list[dict[str, object]]:
     return minuta_records
 
 
+def validate_delivery_record(record: dict[str, object]) -> list[str]:
+    missing_fields: list[str] = []
+    required_mapping = {
+        "nota": "Nota",
+        "data": "Data",
+        "cliente": "Cliente",
+        "cidade": "Cidade",
+        "uf": "UF",
+    }
+
+    for field_name, label in required_mapping.items():
+        if not str(record.get(field_name, "") or "").strip():
+            missing_fields.append(label)
+
+    if parse_float(record.get("valor", 0.0)) <= 0:
+        missing_fields.append("Valor")
+    if parse_float(record.get("peso", 0.0)) <= 0:
+        missing_fields.append("Peso")
+    return missing_fields
+
+
+def build_minuta_entrega_records(dataframe: pd.DataFrame) -> tuple[list[dict[str, object]], list[str], dict[str, float | int]]:
+    if dataframe.empty:
+        return [], [], {"total_volumes": 0.0, "total_peso": 0.0, "total_valor": 0.0, "total_nfs": 0}
+
+    valid_rows = dataframe[dataframe["Status"].map(is_authorized_nf_status)].copy()
+    if valid_rows.empty:
+        return [], ["Nenhuma NF autorizada esta disponivel para gerar a minuta de entrega."], {"total_volumes": 0.0, "total_peso": 0.0, "total_valor": 0.0, "total_nfs": 0}
+
+    issues: list[str] = []
+    entrega_records: list[dict[str, object]] = []
+    grouped_df = valid_rows.groupby("NF", sort=False, dropna=False)
+
+    for nf, group in grouped_df:
+        first_row = group.iloc[0]
+        cliente_excel = first_non_empty(first_row.get("ClienteExcel"), first_row.get("Destinatario"))
+        cidade_excel = first_non_empty(first_row.get("CidadeExcel"), first_row.get("Municipio"))
+        uf_excel = first_non_empty(first_row.get("UFExcel"), first_row.get("UF"), infer_uf_from_chave(first_row.get("ChaveNFe", "")))
+        valor_excel = parse_float(first_row.get("ValorExcel", 0.0))
+        valor_xml = parse_float(first_row.get("ValorNF", 0.0))
+        peso_excel = parse_float(first_row.get("PesoExcel", 0.0))
+        peso_xml = parse_float(first_row.get("PesoTotalNF", group["Peso"].sum()))
+        volume_excel = parse_float(first_row.get("VolumeExcel", 0.0))
+        volume_xml = parse_float(first_row.get("Volume", 0.0))
+
+        if first_non_empty(first_row.get("ClienteExcel")) and first_non_empty(first_row.get("Destinatario")):
+            if normalize_matching_text(first_row.get("ClienteExcel")) != normalize_matching_text(first_row.get("Destinatario")):
+                issues.append(f"NF {nf}: cliente diverge entre Excel e XML. Foi mantido o valor do Excel.")
+
+        if first_non_empty(first_row.get("CidadeExcel")) and first_non_empty(first_row.get("Municipio")):
+            if normalize_matching_text(first_row.get("CidadeExcel")) != normalize_matching_text(first_row.get("Municipio")):
+                issues.append(f"NF {nf}: cidade diverge entre Excel e XML. Foi mantido o valor do Excel.")
+
+        if first_non_empty(first_row.get("UFExcel")) and first_non_empty(first_row.get("UF")):
+            if normalize_matching_text(first_row.get("UFExcel")) != normalize_matching_text(first_row.get("UF")):
+                issues.append(f"NF {nf}: UF diverge entre Excel e XML. Foi mantido o valor do Excel.")
+
+        if valor_excel > 0 and valor_xml > 0 and abs(valor_excel - valor_xml) > 0.01:
+            issues.append(f"NF {nf}: valor diverge entre Excel e XML. Foi mantido o valor do Excel.")
+
+        if peso_excel > 0 and peso_xml > 0 and abs(peso_excel - peso_xml) > 0.01:
+            issues.append(f"NF {nf}: peso diverge entre Excel e XML. Foi mantido o valor do Excel.")
+
+        item_volume = volume_xml if volume_xml > 0 else volume_excel
+
+        record = {
+            "item": item_volume,
+            "nota": str(nf or "").strip(),
+            "data": first_non_empty(first_row.get("Data")),
+            "cliente": cliente_excel,
+            "cidade": cidade_excel,
+            "uf": normalize_uf_value(uf_excel),
+            "valor": valor_excel if valor_excel > 0 else valor_xml,
+            "peso": peso_excel if peso_excel > 0 else peso_xml,
+            "volume": item_volume,
+            "rota": first_non_empty(first_row.get("ROTA"), cidade_excel),
+            "status": first_non_empty(first_row.get("Status")),
+        }
+
+        missing_fields = validate_delivery_record(record)
+        if missing_fields:
+            issues.append(f"NF {nf}: campos obrigatorios ausentes ou invalidos ({', '.join(missing_fields)}).")
+            continue
+
+        entrega_records.append(record)
+
+    entrega_records = sorted(
+        entrega_records,
+        key=lambda record: (
+            normalize_matching_text(record.get("rota", "") or record.get("cidade", "")),
+            normalize_matching_text(record.get("cidade", "")),
+            normalize_matching_text(record.get("cliente", "")),
+            normalize_nf(record.get("nota", "")),
+        ),
+    )
+
+    totals = {
+        "total_volumes": float(sum(parse_float(record.get("volume", 0.0)) for record in entrega_records)),
+        "total_peso": float(sum(parse_float(record.get("peso", 0.0)) for record in entrega_records)),
+        "total_valor": float(sum(parse_float(record.get("valor", 0.0)) for record in entrega_records)),
+        "total_nfs": int(len(entrega_records)),
+    }
+    return entrega_records, issues, totals
+
+
+def build_delivery_table_dataframe(records: list[dict[str, object]]) -> pd.DataFrame:
+    table_df = pd.DataFrame(records)
+    if table_df.empty:
+        return pd.DataFrame(columns=["Nota", "Vol", "Emissao", "Cliente", "Cidade", "UF", "Valor", "Peso", "Rota"])
+
+    table_df = table_df.rename(
+        columns={
+            "nota": "Nota",
+            "item": "Vol",
+            "data": "Emissao",
+            "cliente": "Cliente",
+            "cidade": "Cidade",
+            "uf": "UF",
+            "valor": "Valor",
+            "peso": "Peso",
+            "rota": "Rota",
+        }
+    )
+    table_df["Vol"] = table_df["Vol"].apply(format_quantity_display)
+    table_df["Cliente"] = table_df["Cliente"].apply(lambda value: wrap_table_text(value, 34))
+    table_df["Cidade"] = table_df["Cidade"].apply(lambda value: wrap_table_text(value, 18))
+    return table_df[["Nota", "Vol", "Emissao", "Cliente", "Cidade", "UF", "Valor", "Peso", "Rota"]]
+
+
+def build_delivery_table_column_config() -> dict[str, object]:
+    return {
+        "Nota": st.column_config.TextColumn("Nota", width="small"),
+        "Vol": st.column_config.TextColumn("Vol", width="small"),
+        "Emissao": st.column_config.TextColumn("Emissao", width="small"),
+        "Cliente": st.column_config.TextColumn("Cliente", width="large"),
+        "Cidade": st.column_config.TextColumn("Cidade", width="medium"),
+        "UF": st.column_config.TextColumn("UF", width="small"),
+        "Valor": st.column_config.NumberColumn("Valor", format="R$ %.2f", width="small"),
+        "Peso": st.column_config.NumberColumn("Peso", format="%.3f kg", width="small"),
+        "Rota": st.column_config.TextColumn("Rota", width="medium"),
+    }
+
+
+def process_minuta_inputs(process_clicked: bool, xml_records: list, excel_file) -> None:
+    if not process_clicked:
+        return
+
+    if excel_file is None:
+        st.error("Envie um arquivo Excel para iniciar o processamento.")
+        return
+
+    try:
+        excel_base = load_excel_base(excel_file)
+        processed_df, summary, issues, nf_debug = integrate_excel_with_xml(excel_base, xml_records or [])
+        st.session_state.processed_df = processed_df
+        st.session_state.summary = summary
+        st.session_state.issues = issues
+        st.session_state.nf_debug = pd.DataFrame(nf_debug, columns=NF_DEBUG_COLUMNS)
+        st.session_state.document_issue_at = format_datetime_display()
+
+        if processed_df.empty:
+            st.warning("Nenhum dado foi processado. Verifique se o Excel possui NFs validas.")
+        else:
+            st.success("Processamento concluido.")
+    except ValueError as exc:
+        st.session_state.processed_df = create_empty_processed_df()
+        st.session_state.summary = create_empty_summary()
+        st.session_state.issues = []
+        st.session_state.nf_debug = create_empty_nf_debug_df()
+        st.error(str(exc))
+    except Exception as exc:
+        st.session_state.processed_df = create_empty_processed_df()
+        st.session_state.summary = create_empty_summary()
+        st.session_state.issues = []
+        st.session_state.nf_debug = create_empty_nf_debug_df()
+        st.error(f"Erro inesperado ao processar os arquivos: {exc}")
+
+
 def generate_minuta_pdf(
     dados_minuta: list[dict[str, object]],
     numero_carga: str,
     data_emissao: str,
     veiculo: str,
     motorista: str,
+    pdf_title: str = "MINUTA DE CARREGAMENTO",
+    subject_label: str = "Carregamento",
 ) -> bytes:
     regular_font, bold_font = register_pdf_fonts()
     mono_font = PDF_FONT_MONO
@@ -1142,7 +1458,7 @@ def generate_minuta_pdf(
 
     def draw_page_title(y_pos: float, continuation: bool = False) -> float:
         pdf.setFont(bold_font, 20 if not continuation else 14)
-        title = "MINUTA DE CARREGAMENTO"
+        title = pdf_title
         if continuation:
             title = f"{title} - CONTINUACAO"
         pdf.drawCentredString(page_width / 2, y_pos, title)
@@ -1157,7 +1473,7 @@ def generate_minuta_pdf(
         y_pos -= 24
 
         pdf.setFont(regular_font, 11)
-        pdf.drawString(left_margin, y_pos, f"Carregamento:   {numero_carga or '--'}")
+        pdf.drawString(left_margin, y_pos, f"{subject_label}:   {numero_carga or '--'}")
         y_pos -= 18
         pdf.drawString(left_margin, y_pos, f"Emissao:   {data_emissao or '--'}")
         y_pos -= 16
@@ -1403,17 +1719,21 @@ def serialize_xml_record(xml_data: dict[str, object]) -> dict[str, object]:
         )
 
     municipio = str(xml_data.get("Municipio", "") or "").strip()
+    chave_nfe = normalize_chave_nfe(xml_data.get("ChaveNFe", ""))
+    uf_value = normalize_uf_value(xml_data.get("UF", "")) or infer_uf_from_chave(chave_nfe)
     return {
         "NF": normalize_nf(xml_data.get("NF", "") or xml_data.get("nf_normalizada", "")),
         "nf_normalizada": normalize_nf(xml_data.get("nf_normalizada", "") or xml_data.get("NF", "")),
-        "ChaveNFe": normalize_chave_nfe(xml_data.get("ChaveNFe", "")),
+        "ChaveNFe": chave_nfe,
         "Data": str(xml_data.get("Data", "") or "").strip(),
         "DataReferencia": str(xml_data.get("DataReferencia", "") or "").strip(),
         "DataReferenciaISO": str(xml_data.get("DataReferenciaISO", "") or "").strip(),
         "Destinatario": str(xml_data.get("Destinatario", "") or "").strip(),
         "Municipio": municipio,
+        "UF": uf_value,
         "Status": normalize_nf_status(xml_data.get("StatusNF", xml_data.get("Status", ""))),
         "StatusNF": normalize_nf_status(xml_data.get("StatusNF", xml_data.get("Status", ""))),
+        "ValorNF": parse_float(xml_data.get("ValorNF", 0.0)),
         "VolumeTotal": parse_float(xml_data.get("VolumeTotal", 0.0)),
         "PesoTotal": parse_float(xml_data.get("PesoTotal", 0.0)),
         "Items": items,
@@ -1576,6 +1896,13 @@ def carregar_xmls_processados_json(json_path: str) -> tuple[list[dict[str, objec
         records = [serialize_xml_record(item) for item in payload if isinstance(item, dict)]
     except Exception as exc:
         return [], f"Os XMLs salvos no sistema estao corrompidos ({exc}). Envie novos arquivos para atualizar a base."
+
+    original_records = [item for item in payload if isinstance(item, dict)]
+    if records != original_records:
+        try:
+            path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
 
     return records, ""
 
@@ -3405,8 +3732,16 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_source: object) -> tuple
                         "Volume": xml_data["VolumeTotal"],
                         "Peso": 0.0,
                         "PesoTotalNF": xml_data["PesoTotal"],
+                        "ValorNF": xml_data.get("ValorNF", 0.0),
                         "Destinatario": xml_data["Destinatario"],
                         "Municipio": xml_data["Municipio"],
+                        "UF": xml_data.get("UF", ""),
+                        "ClienteExcel": metadata_row.get("ClienteExcel", ""),
+                        "CidadeExcel": metadata_row.get("CidadeExcel", ""),
+                        "UFExcel": metadata_row.get("UFExcel", ""),
+                        "ValorExcel": metadata_row.get("ValorExcel", 0.0),
+                        "PesoExcel": metadata_row.get("PesoExcel", 0.0),
+                        "VolumeExcel": metadata_row.get("VolumeExcel", 0.0),
                         "Status": str(xml_data["Status"]),
                     }
                 )
@@ -3427,8 +3762,16 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_source: object) -> tuple
                         "Volume": xml_data["VolumeTotal"],
                         "Peso": item["Peso"],
                         "PesoTotalNF": xml_data["PesoTotal"],
+                        "ValorNF": xml_data.get("ValorNF", 0.0),
                         "Destinatario": xml_data["Destinatario"],
                         "Municipio": xml_data["Municipio"],
+                        "UF": xml_data.get("UF", ""),
+                        "ClienteExcel": metadata_row.get("ClienteExcel", ""),
+                        "CidadeExcel": metadata_row.get("CidadeExcel", ""),
+                        "UFExcel": metadata_row.get("UFExcel", ""),
+                        "ValorExcel": metadata_row.get("ValorExcel", 0.0),
+                        "PesoExcel": metadata_row.get("PesoExcel", 0.0),
+                        "VolumeExcel": metadata_row.get("VolumeExcel", 0.0),
                         "Status": str(xml_data["Status"]),
                     }
                 )
@@ -3449,6 +3792,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_source: object) -> tuple
             "filial": summarize_filial(base_df),
             "numero_carga": metadata["numero_carga"],
             "data_saida": metadata["data_saida"],
+            "transportadora": metadata["transportadora"],
             "motorista": metadata["motorista"],
             "placa": metadata["placa"],
             "nf_count": int(display_df["NF"].nunique()),
@@ -3504,8 +3848,16 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_source: object) -> tuple
                     "Volume": 0.0,
                     "Peso": 0.0,
                     "PesoTotalNF": 0.0,
+                    "ValorNF": 0.0,
                     "Destinatario": "",
                     "Municipio": "",
+                    "UF": "",
+                    "ClienteExcel": row.get("ClienteExcel", ""),
+                    "CidadeExcel": row.get("CidadeExcel", ""),
+                    "UFExcel": row.get("UFExcel", ""),
+                    "ValorExcel": row.get("ValorExcel", 0.0),
+                    "PesoExcel": row.get("PesoExcel", 0.0),
+                    "VolumeExcel": row.get("VolumeExcel", 0.0),
                     "Status": "XML nao encontrado",
                 }
             )
@@ -3526,8 +3878,16 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_source: object) -> tuple
                     "Volume": xml_data["VolumeTotal"],
                     "Peso": 0.0,
                     "PesoTotalNF": xml_data["PesoTotal"],
+                    "ValorNF": xml_data.get("ValorNF", 0.0),
                     "Destinatario": xml_data["Destinatario"],
                     "Municipio": xml_data["Municipio"],
+                    "UF": xml_data.get("UF", ""),
+                    "ClienteExcel": row.get("ClienteExcel", ""),
+                    "CidadeExcel": row.get("CidadeExcel", ""),
+                    "UFExcel": row.get("UFExcel", ""),
+                    "ValorExcel": row.get("ValorExcel", 0.0),
+                    "PesoExcel": row.get("PesoExcel", 0.0),
+                    "VolumeExcel": row.get("VolumeExcel", 0.0),
                     "Status": str(xml_data["Status"]),
                 }
             )
@@ -3548,8 +3908,16 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_source: object) -> tuple
                     "Volume": xml_data["VolumeTotal"],
                     "Peso": item["Peso"],
                     "PesoTotalNF": xml_data["PesoTotal"],
+                    "ValorNF": xml_data.get("ValorNF", 0.0),
                     "Destinatario": xml_data["Destinatario"],
                     "Municipio": xml_data["Municipio"],
+                    "UF": xml_data.get("UF", ""),
+                    "ClienteExcel": row.get("ClienteExcel", ""),
+                    "CidadeExcel": row.get("CidadeExcel", ""),
+                    "UFExcel": row.get("UFExcel", ""),
+                    "ValorExcel": row.get("ValorExcel", 0.0),
+                    "PesoExcel": row.get("PesoExcel", 0.0),
+                    "VolumeExcel": row.get("VolumeExcel", 0.0),
                     "Status": str(xml_data["Status"]),
                 }
             )
@@ -3570,6 +3938,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_source: object) -> tuple
         "filial": summarize_filial(base_df),
         "numero_carga": metadata["numero_carga"],
         "data_saida": metadata["data_saida"],
+        "transportadora": metadata["transportadora"],
         "motorista": metadata["motorista"],
         "placa": metadata["placa"],
         "nf_count": int(base_df["NF"].nunique()),
@@ -3586,6 +3955,7 @@ def create_empty_summary() -> dict[str, object]:
         "filial": "BRIDA",
         "numero_carga": "--",
         "data_saida": "--",
+        "transportadora": "BRIDA LUBRIFICANTES LTDA",
         "motorista": "--",
         "placa": "--",
         "nf_count": 0,
@@ -3596,7 +3966,25 @@ def create_empty_summary() -> dict[str, object]:
 
 
 def create_empty_processed_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=["Seq_sort", "ChaveNFe", "Data", "Volume", "PesoTotalNF", "Municipio", *TABLE_COLUMNS])
+    return pd.DataFrame(
+        columns=[
+            "Seq_sort",
+            "ChaveNFe",
+            "Data",
+            "Volume",
+            "PesoTotalNF",
+            "ValorNF",
+            "Municipio",
+            "UF",
+            "ClienteExcel",
+            "CidadeExcel",
+            "UFExcel",
+            "ValorExcel",
+            "PesoExcel",
+            "VolumeExcel",
+            *TABLE_COLUMNS,
+        ]
+    )
 
 
 def create_empty_nf_debug_df() -> pd.DataFrame:
@@ -3673,10 +4061,15 @@ def normalize_screen_name(value: object) -> str:
         SCREEN_LOGIN: SCREEN_LOGIN,
         SCREEN_MENU: SCREEN_MENU,
         SCREEN_MINUTA: SCREEN_MINUTA,
+        SCREEN_ENTREGA: SCREEN_ENTREGA,
         SCREEN_SEPARACAO: SCREEN_SEPARACAO,
         SCREEN_LOTES: SCREEN_LOTES,
     }
     return screen_aliases.get(screen, SCREEN_MENU)
+
+
+def get_minuta_module_config(screen_name: str) -> MinutaModuleConfig:
+    return MINUTA_MODULES.get(screen_name, MINUTA_CARREGAMENTO_CONFIG)
 
 
 def navegar(tela: str) -> None:
@@ -3798,6 +4191,30 @@ def render_metric_card(title: str, value: object, icon_key: str) -> None:
     """,
         unsafe_allow_html=True,
     )
+
+
+def render_metric_cards_row(cards: list[dict[str, object]]) -> None:
+    normalized_cards = list(cards[:4])
+    while len(normalized_cards) < 4:
+        normalized_cards.append({"title": "--", "value": "--", "subtitle": "", "icon_key": "dados_gerais"})
+
+    card_markup: list[str] = []
+    for card in normalized_cards:
+        title = html.escape(str(card.get("title", "") or ""))
+        value = html.escape(str(card.get("value", "") or "--"))
+        subtitle = html.escape(str(card.get("subtitle", "") or "")) or "&nbsp;"
+        icon_key = str(card.get("icon_key", "dados_gerais") or "dados_gerais")
+        icon_markup = render_label_icon(ICON_MAP.get(icon_key, ICON_MAP["dados_gerais"]))
+        card_markup.append(
+            "<div class=\"erp-card erp-card-kpi erp-card-kpi-fixed\">"
+            f"<div class=\"erp-kpi-top\"><div class=\"erp-kpi-icon\">{icon_markup}</div><div class=\"erp-kpi-label\">{title}</div></div>"
+            f"<div class=\"erp-kpi-value\">{value}</div>"
+            f"<div class=\"erp-kpi-subtitle\">{subtitle}</div>"
+            "</div>"
+        )
+
+    grid_markup = "<div class=\"erp-kpi-grid\">" + "".join(card_markup) + "</div>"
+    st.markdown(grid_markup, unsafe_allow_html=True)
 
 
 def render_section_heading(label: str, icon_key: str) -> None:
@@ -4199,7 +4616,7 @@ def render_sidebar() -> tuple[list, object, bool]:
                     st.warning(issue)
         render_box_close()
 
-        if normalize_screen_name(st.session_state.get("tela", SCREEN_MENU)) != SCREEN_MINUTA:
+        if normalize_screen_name(st.session_state.get("tela", SCREEN_MENU)) not in {SCREEN_MINUTA, SCREEN_ENTREGA}:
             return xml_records, None, False
 
         render_box_open("is-sidebar")
@@ -4215,42 +4632,21 @@ def render_sidebar() -> tuple[list, object, bool]:
             type=["xlsx", "xls"],
         )
 
-        process_clicked = st.button("Processar", use_container_width=True)
+        current_screen = normalize_screen_name(st.session_state.get("tela", SCREEN_MENU))
+        process_label = "Gerar Minuta" if current_screen == SCREEN_ENTREGA else "Processar"
+        process_clicked = st.button(process_label, use_container_width=True)
         render_box_close()
 
     return xml_records, excel_file, process_clicked
 
 
-def render_processing_screen(process_clicked: bool, xml_records: list, excel_file) -> None:
-    if process_clicked:
-        if excel_file is None:
-            st.error("Envie um arquivo Excel para iniciar o processamento.")
-        else:
-            try:
-                excel_base = load_excel_base(excel_file)
-                processed_df, summary, issues, nf_debug = integrate_excel_with_xml(excel_base, xml_records or [])
-                st.session_state.processed_df = processed_df
-                st.session_state.summary = summary
-                st.session_state.issues = issues
-                st.session_state.nf_debug = pd.DataFrame(nf_debug, columns=NF_DEBUG_COLUMNS)
-                st.session_state.document_issue_at = format_datetime_display()
-
-                if processed_df.empty:
-                    st.warning("Nenhum dado foi processado. Verifique se o Excel possui NFs validas.")
-                else:
-                    st.success("Processamento concluido.")
-            except ValueError as exc:
-                st.session_state.processed_df = create_empty_processed_df()
-                st.session_state.summary = create_empty_summary()
-                st.session_state.issues = []
-                st.session_state.nf_debug = create_empty_nf_debug_df()
-                st.error(str(exc))
-            except Exception as exc:
-                st.session_state.processed_df = create_empty_processed_df()
-                st.session_state.summary = create_empty_summary()
-                st.session_state.issues = []
-                st.session_state.nf_debug = create_empty_nf_debug_df()
-                st.error(f"Erro inesperado ao processar os arquivos: {exc}")
+def render_processing_screen(
+    process_clicked: bool,
+    xml_records: list,
+    excel_file,
+    module_config: MinutaModuleConfig,
+) -> None:
+    process_minuta_inputs(process_clicked, xml_records, excel_file)
 
     summary = st.session_state.summary
     route_version = get_path_cache_token(PRACAS_JSON_PATH)
@@ -4261,7 +4657,7 @@ def render_processing_screen(process_clicked: bool, xml_records: list, excel_fil
     with dados_col_1:
         render_info_card("Filial", summary["filial"], "filial")
     with dados_col_2:
-        render_info_card("Carregamento", summary["numero_carga"], "carregamento")
+        render_info_card(module_config.subject_label, summary["numero_carga"], "carregamento")
     with dados_col_3:
         render_info_card("Data Saida", summary["data_saida"], "data_saida")
 
@@ -4271,16 +4667,15 @@ def render_processing_screen(process_clicked: bool, xml_records: list, excel_fil
     with dados_col_5:
         render_info_card("Placa", summary["placa"], "placa")
 
-    render_section_heading("Resumo da Carga", "resumo_carga")
-    resumo_col_1, resumo_col_2, resumo_col_3, resumo_col_4 = st.columns(4, gap="medium")
-    with resumo_col_1:
-        render_metric_card("NF", summary["nf_count"], "nf")
-    with resumo_col_2:
-        render_metric_card("Peso", f"{summary['peso_total'] / 1000:.3f} t", "peso")
-    with resumo_col_3:
-        render_metric_card("Itens", summary["item_count"], "itens")
-    with resumo_col_4:
-        render_metric_card("Erros", summary["error_count"], "erros")
+    render_section_heading(module_config.summary_label, "resumo_carga")
+    render_metric_cards_row(
+        [
+            {"title": "Notas", "value": summary["nf_count"], "icon_key": "nf"},
+            {"title": "Peso Total", "value": f"{summary['peso_total'] / 1000:.3f} t", "icon_key": "peso"},
+            {"title": "Itens", "value": summary["item_count"], "icon_key": "itens"},
+            {"title": "Erros", "value": summary["error_count"], "icon_key": "erros"},
+        ]
+    )
 
     if DISPLAY_PROCESSING_WARNINGS and st.session_state.issues:
         for issue in st.session_state.issues:
@@ -4306,37 +4701,203 @@ def render_processing_screen(process_clicked: bool, xml_records: list, excel_fil
     styled_display_df = build_status_styler(display_df)
 
     minuta_records = build_minuta_records(processed_df)
-    pdf_bytes = b""
+    entrega_records, _, entrega_totals = build_minuta_entrega_records(processed_df)
+    transportadora = str(summary.get("transportadora", "BRIDA LUBRIFICANTES LTDA") or "BRIDA LUBRIFICANTES LTDA")
+
+    carregamento_pdf_bytes = b""
     if minuta_records:
-        pdf_bytes = generate_minuta_pdf(
+        carregamento_pdf_bytes = generate_minuta_pdf(
             dados_minuta=minuta_records,
             numero_carga=str(summary.get("numero_carga", "--") or "--"),
             data_emissao=str(st.session_state.document_issue_at or "--"),
             veiculo=str(summary.get("placa", "--") or "--"),
             motorista=str(summary.get("motorista", "--") or "--"),
+            pdf_title=module_config.pdf_title,
+            subject_label=module_config.subject_label,
+        )
+
+    entrega_pdf_bytes = b""
+    if entrega_records:
+        entrega_pdf_bytes = generate_minuta_entrega_pdf(
+            records=entrega_records,
+            totals=entrega_totals,
+            numero_documento=str(summary.get("numero_carga", "--") or "--"),
+            data_emissao=str(st.session_state.document_issue_at or "--"),
+            transportadora=transportadora,
+            veiculo=str(summary.get("placa", "--") or "--"),
+            motorista=str(summary.get("motorista", "--") or "--"),
+            placa=str(summary.get("placa", "--") or "--"),
         )
 
     with action_col_download:
-        st.markdown('<div class="section-title export-title">Exportacao</div>', unsafe_allow_html=True)
-        pdf_col_left, pdf_col_right = st.columns([1.0, 1.1], gap="small")
-        with pdf_col_right:
+        st.markdown(f'<div class="section-title export-title">{html.escape(module_config.export_label)}</div>', unsafe_allow_html=True)
+        carregamento_checkbox_key = f"{module_config.screen_key}_pdf_carregamento"
+        entrega_checkbox_key = f"{module_config.screen_key}_pdf_entrega"
+        if carregamento_checkbox_key not in st.session_state:
+            st.session_state[carregamento_checkbox_key] = True
+        if entrega_checkbox_key not in st.session_state:
+            st.session_state[entrega_checkbox_key] = False
+
+        checkbox_col_1, checkbox_col_2, button_col = st.columns([1.1, 0.9, 1.1], gap="small")
+        with checkbox_col_1:
+            st.checkbox("Minuta de Carregamento", key=carregamento_checkbox_key)
+        with checkbox_col_2:
+            st.checkbox("Minuta de Entrega", key=entrega_checkbox_key)
+
+        carregamento_selected = bool(st.session_state.get(carregamento_checkbox_key))
+        entrega_selected = bool(st.session_state.get(entrega_checkbox_key))
+
+        download_payload = b""
+        download_name = ""
+        download_mime = "application/pdf"
+        validation_message = ""
+
+        if not carregamento_selected and not entrega_selected:
+            validation_message = "Selecione ao menos um tipo de minuta para gerar o PDF"
+        elif carregamento_selected and not entrega_selected:
+            if not carregamento_pdf_bytes:
+                validation_message = "Nao ha dados disponiveis para gerar a minuta de carregamento."
+            else:
+                download_payload = carregamento_pdf_bytes
+                download_name = f"minuta_carregamento_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.pdf"
+        elif entrega_selected and not carregamento_selected:
+            if not entrega_pdf_bytes:
+                validation_message = "Nao ha dados validos disponiveis para gerar a minuta de entrega."
+            else:
+                download_payload = entrega_pdf_bytes
+                download_name = f"minuta_entrega_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.pdf"
+        else:
+            missing_documents: list[str] = []
+            if not carregamento_pdf_bytes:
+                missing_documents.append("carregamento")
+            if not entrega_pdf_bytes:
+                missing_documents.append("entrega")
+
+            if missing_documents:
+                missing_label = " e ".join(missing_documents)
+                validation_message = f"Nao foi possivel gerar a minuta de {missing_label}."
+            else:
+                zip_buffer = BytesIO()
+                with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    archive.writestr("minuta_carregamento.pdf", carregamento_pdf_bytes)
+                    archive.writestr("minuta_entrega.pdf", entrega_pdf_bytes)
+                download_payload = zip_buffer.getvalue()
+                download_name = f"minutas_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.zip"
+                download_mime = "application/zip"
+
+        with button_col:
             st.download_button(
                 "Baixar PDF",
-                data=pdf_bytes,
-                file_name=f"minuta_carregamento_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.pdf",
-                mime="application/pdf",
+                data=download_payload,
+                file_name=download_name,
+                mime=download_mime,
                 use_container_width=True,
-                disabled=not bool(pdf_bytes),
+                disabled=not bool(download_payload),
             )
 
-    st.markdown("### Painel de Notas e Itens")
-    st.caption("Visualizacao consolidada da carga com detalhamento operacional por nota fiscal.")
+        if validation_message:
+            st.warning(validation_message)
+
+    st.markdown(f"### {module_config.panel_title}")
+    st.caption(module_config.panel_caption)
     st.dataframe(
         styled_display_df,
         width="stretch",
         hide_index=True,
         column_config=build_table_column_config(display_df),
         row_height=56,
+    )
+
+
+def render_delivery_screen(process_clicked: bool, xml_records: list, excel_file) -> None:
+    process_minuta_inputs(process_clicked, xml_records, excel_file)
+
+    summary = st.session_state.summary
+    processed_df = st.session_state.processed_df.copy()
+    entrega_records, entrega_issues, totals = build_minuta_entrega_records(processed_df)
+    transportadora = str(summary.get("transportadora", "BRIDA LUBRIFICANTES LTDA") or "BRIDA LUBRIFICANTES LTDA")
+
+    render_section_heading("Dados Gerais", "dados_gerais")
+    dados_col_1, dados_col_2, dados_col_3 = st.columns(3, gap="medium")
+    with dados_col_1:
+        render_info_card("Filial", summary["filial"], "filial")
+    with dados_col_2:
+        render_info_card("Carregamento", summary["numero_carga"], "carregamento")
+    with dados_col_3:
+        render_info_card("Data Emissao", st.session_state.get("document_issue_at", "--"), "data_saida")
+
+    dados_col_4, dados_col_5, dados_col_6 = st.columns(3, gap="medium")
+    with dados_col_4:
+        render_info_card("Transportadora", transportadora, "motorista")
+    with dados_col_5:
+        render_info_card("Veiculo", summary["placa"], "placa")
+    with dados_col_6:
+        render_info_card("Motorista", summary["motorista"], "motorista")
+
+    render_section_heading("Resumo da Entrega", "resumo_carga")
+    render_metric_cards_row(
+        [
+            {"title": "Notas", "value": totals["total_nfs"], "icon_key": "nf"},
+            {"title": "Volumes", "value": f"{totals['total_volumes']:.0f}", "icon_key": "itens"},
+            {"title": "Peso Total", "value": f"{totals['total_peso'] / 1000:.3f} t", "icon_key": "peso"},
+            {"title": "Valor Total", "value": f"R$ {format_decimal_br(totals['total_valor'])}", "icon_key": "dados_gerais"},
+        ]
+    )
+
+    delivery_df = build_delivery_table_dataframe(entrega_records)
+    search_col, action_col = st.columns([2.2, 1.4], gap="medium")
+    with search_col:
+        st.markdown('<div class="section-title">Localizar entregas</div>', unsafe_allow_html=True)
+        search_term = st.text_input("Pesquisar entrega", placeholder="Buscar nota, cliente, cidade, UF ou rota")
+
+    normalized_search_term = str(search_term or "").strip().lower()
+    if normalized_search_term and not delivery_df.empty:
+        search_mask = delivery_df.astype(str).apply(lambda column: column.str.lower().str.contains(normalized_search_term, na=False))
+        delivery_df = delivery_df[search_mask.any(axis=1)]
+
+    pdf_bytes = b""
+    if entrega_records:
+        try:
+            pdf_bytes = generate_minuta_entrega_pdf(
+                records=entrega_records,
+                totals=totals,
+                numero_documento=str(summary.get("numero_carga", "--") or "--"),
+                data_emissao=str(st.session_state.get("document_issue_at", "--") or "--"),
+                transportadora=transportadora,
+                veiculo=str(summary.get("placa", "--") or "--"),
+                motorista=str(summary.get("motorista", "--") or "--"),
+                placa=str(summary.get("placa", "--") or "--"),
+            )
+        except Exception as exc:
+            st.error(f"Erro ao gerar o PDF da minuta de entrega: {exc}")
+    elif process_clicked or not processed_df.empty:
+        st.error("Nenhuma NF valida foi encontrada para gerar a minuta de entrega.")
+
+    with action_col:
+        st.markdown('<div class="section-title export-title">Exportacao</div>', unsafe_allow_html=True)
+        pdf_button_col, print_button_col = st.columns(2, gap="small")
+        with pdf_button_col:
+            st.download_button(
+                "Baixar PDF",
+                data=pdf_bytes,
+                file_name=f"minuta_entrega_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                disabled=not bool(pdf_bytes),
+            )
+        with print_button_col:
+            print_disabled = not bool(pdf_bytes)
+            if st.button("Imprimir PDF", use_container_width=True, disabled=print_disabled):
+                open_pdf_for_print(pdf_bytes, "Minuta de Entrega")
+
+    st.markdown("### Painel da Minuta de Entrega")
+    st.caption("Romaneio limpo por nota fiscal, pronto para impressao e conferência operacional em campo.")
+    st.dataframe(
+        delivery_df,
+        width="stretch",
+        hide_index=True,
+        column_config=build_delivery_table_column_config(),
+        row_height=48,
     )
 
 
@@ -4488,15 +5049,14 @@ def render_separacao_screen(
     summary = summarize_separacao(current_records)
     render_box_open()
     render_section_heading("Visão Operacional", "separacao")
-    metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4, gap="medium")
-    with metric_col_1:
-        render_metric_card("NF", summary["nf_total"], "nf")
-    with metric_col_2:
-        render_metric_card("Pendentes", summary["pendentes"], "processar")
-    with metric_col_3:
-        render_metric_card("Separadas", summary["separadas"], "status_operacional")
-    with metric_col_4:
-        render_metric_card("Lotes Fech.", summary["lotes_fechados"], "erros")
+    render_metric_cards_row(
+        [
+            {"title": "Notas", "value": summary["nf_total"], "icon_key": "nf"},
+            {"title": "Pendentes", "value": summary["pendentes"], "icon_key": "processar"},
+            {"title": "Separadas", "value": summary["separadas"], "icon_key": "status_operacional"},
+            {"title": "Lotes Fech.", "value": summary["lotes_fechados"], "icon_key": "erros"},
+        ]
+    )
     render_box_close()
 
     render_box_open()
@@ -4604,13 +5164,14 @@ def render_separacao_screen(
         unsafe_allow_html=True,
     )
 
-    base_col_1, base_col_2, base_col_3 = st.columns(3, gap="medium")
-    with base_col_1:
-        render_metric_card("XMLs", len(current_xml_records), "xml")
-    with base_col_2:
-        render_metric_card("Separações", len(current_records), "separacao")
-    with base_col_3:
-        render_metric_card("Lotes", len(current_lotes_registry), "lotes")
+    render_metric_cards_row(
+        [
+            {"title": "XMLs", "value": len(current_xml_records), "icon_key": "xml"},
+            {"title": "Separações", "value": len(current_records), "icon_key": "separacao"},
+            {"title": "Lotes", "value": len(current_lotes_registry), "icon_key": "lotes"},
+            {"title": "Total Bases", "value": len(current_xml_records) + len(current_records) + len(current_lotes_registry), "icon_key": "dados_gerais"},
+        ]
+    )
 
     size_col_1, size_col_2, size_col_3 = st.columns(3, gap="medium")
     with size_col_1:
@@ -5135,6 +5696,38 @@ def render_global_app_styles() -> None:
         justify-content: center;
         gap: 0.2rem;
     }
+    .erp-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 16px;
+        width: 100%;
+        margin: 0 0 18px;
+        align-items: stretch;
+    }
+    .erp-card-kpi-fixed {
+        height: 120px;
+        margin-bottom: 0;
+        padding: 14px 16px;
+        border: 1px solid #E0E0E0;
+        border-radius: 14px;
+        background: #FFFFFF;
+        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        justify-content: space-between;
+        text-align: center;
+        box-sizing: border-box;
+        overflow: hidden;
+    }
+    .erp-kpi-top {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 0.3rem;
+        min-height: 40px;
+    }
     .erp-card-header {
         display: flex;
         align-items: center;
@@ -5169,22 +5762,41 @@ def render_global_app_styles() -> None:
         display: flex;
         align-items: center;
         justify-content: center;
-        margin-bottom: 0.05rem;
+        margin-bottom: 0;
     }
     .erp-kpi-value {
         color: #1F2937;
-        font-size: 1.55rem;
+        font-size: 2rem;
         line-height: 1.1;
         font-weight: 700;
         letter-spacing: -0.03em;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 1 1 auto;
+        min-height: 52px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-family: "Segoe UI", Calibri, Arial, sans-serif;
     }
     .erp-kpi-label {
-        color: #6B7280;
-        font-size: 0.74rem;
-        font-weight: 600;
-        letter-spacing: 0.08em;
+        color: #475467;
+        font-size: 0.82rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
         line-height: 1.2;
-        text-transform: uppercase;
+        text-transform: none;
+        font-family: "Segoe UI", Calibri, Arial, sans-serif;
+    }
+    .erp-kpi-subtitle {
+        color: #98A2B3;
+        font-size: 0.74rem;
+        line-height: 1.15;
+        min-height: 14px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-family: "Segoe UI", Calibri, Arial, sans-serif;
     }
     [data-testid="stDataFrame"] table td {
         vertical-align: middle;
@@ -5334,20 +5946,35 @@ def render_global_app_styles() -> None:
         border-radius: 18px;
         padding: 20px;
         box-shadow: 0 10px 24px rgba(31, 58, 95, 0.06);
-        min-height: 170px;
+        height: 290px;
         margin-bottom: 12px;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        box-sizing: border-box;
+        overflow: hidden;
     }
     .module-card h3 {
         margin: 0.7rem 0 0.35rem;
         color: #16324F;
         font-size: 1.1rem;
         font-weight: 800;
+        line-height: 1.25;
+        min-height: 56px;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
     }
     .module-card p {
-        margin: 0 0 1rem;
+        margin: 0;
         color: #617285;
         font-size: 0.94rem;
         line-height: 1.5;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
     }
     .module-card-icon {
         display: inline-flex;
@@ -5537,7 +6164,12 @@ def render_active_screen(current_screen: str, process_clicked: bool, excel_file)
 
     if current_screen == SCREEN_MINUTA:
         xml_records, _ = load_runtime_reference_data(force_refresh=force_refresh)
-        tela_minuta(process_clicked, xml_records, excel_file)
+        tela_minuta(process_clicked, xml_records, excel_file, get_minuta_module_config(current_screen))
+        return
+
+    if current_screen == SCREEN_ENTREGA:
+        xml_records, _ = load_runtime_reference_data(force_refresh=force_refresh)
+        tela_entrega(process_clicked, xml_records, excel_file)
         return
 
     separacao_records, separacao_sync_issues, separacao_storage_error, separacao_import_summary = load_runtime_operational_data(
@@ -5580,7 +6212,7 @@ def tela_menu() -> None:
             """
         <div class="dashboard-hero">
             <h1>Central Operacional</h1>
-            <p>Selecione um módulo para continuar o fluxo de carregamento, separação e gestão de lotes.</p>
+            <p>Selecione um módulo para continuar o fluxo de carregamento, entrega, separação e gestão de lotes.</p>
         </div>
         """,
             unsafe_allow_html=True,
@@ -5588,31 +6220,66 @@ def tela_menu() -> None:
     with top_col_3:
         st.button("Sair", use_container_width=True, on_click=logout, key="logout_menu")
 
-    card_col_1, card_col_2, card_col_3 = st.columns(3, gap="medium")
     menu_cards = [
-        (card_col_1, SCREEN_MINUTA, "Minuta de Carregamento", "Processamento da carga com XML, Excel e geração da minuta operacional.", "excel", "📦 Minuta de Carregamento"),
-        (card_col_2, SCREEN_SEPARACAO, "Mapa de Separação", "Conferência de picking, leitura de notas e controle operacional da separação.", "separacao", "📊 Mapa de Separação"),
-        (card_col_3, SCREEN_LOTES, "Gestão de Lotes de Separação", "Consulta, exportação e controle dos lotes fechados e em andamento.", "lotes", "📑 Gestão de Lotes de Separação"),
+        {
+            "target_screen": MINUTA_CARREGAMENTO_CONFIG.screen_key,
+            "title": MINUTA_CARREGAMENTO_CONFIG.menu_title,
+            "description": MINUTA_CARREGAMENTO_CONFIG.menu_description,
+            "icon_key": MINUTA_CARREGAMENTO_CONFIG.menu_icon_key,
+            "button_label": MINUTA_CARREGAMENTO_CONFIG.menu_button_label,
+        },
+        {
+            "target_screen": MINUTA_ENTREGA_CONFIG.screen_key,
+            "title": MINUTA_ENTREGA_CONFIG.menu_title,
+            "description": MINUTA_ENTREGA_CONFIG.menu_description,
+            "icon_key": MINUTA_ENTREGA_CONFIG.menu_icon_key,
+            "button_label": MINUTA_ENTREGA_CONFIG.menu_button_label,
+        },
+        {
+            "target_screen": SCREEN_SEPARACAO,
+            "title": "Mapa de Separação",
+            "description": "Conferência de picking, leitura de notas e controle operacional da separação.",
+            "icon_key": "separacao",
+            "button_label": "📊 Mapa de Separação",
+        },
+        {
+            "target_screen": SCREEN_LOTES,
+            "title": "Gestão de Lotes de Separação",
+            "description": "Consulta, exportação e controle dos lotes fechados e em andamento.",
+            "icon_key": "lotes",
+            "button_label": "📑 Gestão de Lotes de Separação",
+        },
     ]
-    for column, target_screen, title, description, icon_key, button_label in menu_cards:
+    row_columns = st.columns(4, gap="medium")
+    for column, card in zip(row_columns, menu_cards):
         with column:
             st.markdown(
                 f"""
             <div class="module-card">
-                <div class="module-card-icon">{render_label_icon(ICON_MAP[icon_key])}</div>
-                <h3>{html.escape(title)}</h3>
-                <p>{html.escape(description)}</p>
+                <div class="module-card-icon">{render_label_icon(ICON_MAP[card['icon_key']])}</div>
+                <h3>{html.escape(card['title'])}</h3>
+                <p>{html.escape(card['description'])}</p>
             </div>
             """,
                 unsafe_allow_html=True,
             )
-            if st.button(button_label, use_container_width=True, key=f"menu_nav_{target_screen}"):
-                navegar(target_screen)
+            if st.button(card["button_label"], use_container_width=True, key=f"menu_nav_{card['target_screen']}"):
+                navegar(card["target_screen"])
 
 
-def tela_minuta(process_clicked: bool, xml_records: list[dict[str, object]], excel_file) -> None:
-    render_screen_header("Minuta de Carregamento", "Processamento de carga com XMLs e rotas")
-    render_processing_screen(process_clicked, xml_records, excel_file)
+def tela_minuta(
+    process_clicked: bool,
+    xml_records: list[dict[str, object]],
+    excel_file,
+    module_config: MinutaModuleConfig,
+) -> None:
+    render_screen_header(module_config.header_title, module_config.header_subtitle)
+    render_processing_screen(process_clicked, xml_records, excel_file, module_config)
+
+
+def tela_entrega(process_clicked: bool, xml_records: list[dict[str, object]], excel_file) -> None:
+    render_screen_header(MINUTA_ENTREGA_CONFIG.header_title, MINUTA_ENTREGA_CONFIG.header_subtitle)
+    render_delivery_screen(process_clicked, xml_records, excel_file)
 
 
 def tela_separacao(
