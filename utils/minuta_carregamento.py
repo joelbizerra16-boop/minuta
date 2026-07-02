@@ -37,25 +37,6 @@ MINUTA_CARREGAMENTO_CONFIG = MinutaModuleConfig(
 )
 
 
-MINUTA_ENTREGA_CONFIG = MinutaModuleConfig(
-    screen_key="minuta_entrega",
-    menu_title="Minuta de Entrega",
-    menu_description="Geração de romaneio operacional com base em XML, Excel e minuta de entrega para impressão.",
-    menu_icon_key="excel",
-    menu_button_label="🚚 Minuta de Entrega",
-    header_title="Minuta de Entrega",
-    header_subtitle="Documento operacional de entrega com XMLs, Excel e PDF para campo",
-    subject_label="Carregamento",
-    summary_label="Resumo da Entrega",
-    export_label="Exportacao",
-    panel_title="Painel da Minuta de Entrega",
-    panel_caption="Visualizacao operacional por nota fiscal para uso do motorista e conferencia em rota.",
-    pdf_title="MINUTA DE ENTREGA",
-    pdf_file_prefix="minuta_entrega",
-)
-
-
 MINUTA_MODULES = {
     MINUTA_CARREGAMENTO_CONFIG.screen_key: MINUTA_CARREGAMENTO_CONFIG,
-    MINUTA_ENTREGA_CONFIG.screen_key: MINUTA_ENTREGA_CONFIG,
 }

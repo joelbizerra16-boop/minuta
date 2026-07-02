@@ -1,0 +1,598 @@
+.stApp {
+        background: #F5F7FA;
+    }
+    .ui-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        min-width: 16px;
+        height: 16px;
+        color: #7C8AA0;
+    }
+    .ui-icon svg {
+        width: 16px;
+        height: 16px;
+        flex-shrink: 0;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        vector-effect: non-scaling-stroke;
+    }
+    .ui-icon svg path {
+        fill: none;
+        stroke: inherit;
+        vector-effect: non-scaling-stroke;
+    }
+    .with-icon {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .section-title-block {
+        margin: 0 0 14px;
+        color: #1F3A5F;
+        font-size: 1rem;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+    }
+    .ui-section-box {
+        background: #FFFFFF;
+        border: 1px solid #E5E7EB;
+        border-radius: 14px;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+        padding: 18px;
+        margin: 0 0 18px;
+    }
+    .ui-section-box.is-soft {
+        background: #FAFBFC;
+    }
+    .ui-section-box.is-sidebar {
+        padding: 14px;
+        margin-bottom: 16px;
+        box-shadow: 0 3px 10px rgba(15, 23, 42, 0.035);
+    }
+    .ui-section-box .section-title-block {
+        margin-bottom: 12px;
+    }
+    .ui-section-box .stCaption {
+        margin-bottom: 0;
+    }
+    .erp-card {
+        background: #FFFFFF;
+        border: 1px solid #E5E7EB;
+        border-radius: 12px;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+        padding: 10px 12px;
+        height: auto;
+        min-height: 0;
+        margin-bottom: 12px;
+        color: #405468;
+    }
+    .erp-card-info {
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        gap: 0.3rem;
+    }
+    .erp-card-kpi {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0.2rem;
+    }
+    .erp-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 16px;
+        width: 100%;
+        margin: 0 0 18px;
+        align-items: stretch;
+    }
+    .erp-card-kpi-fixed {
+        height: 120px;
+        margin-bottom: 0;
+        padding: 14px 16px;
+        border: 1px solid #E0E0E0;
+        border-radius: 14px;
+        background: #FFFFFF;
+        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        justify-content: space-between;
+        text-align: center;
+        box-sizing: border-box;
+        overflow: hidden;
+    }
+    .erp-kpi-top {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 0.3rem;
+        min-height: 40px;
+    }
+    .erp-card-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.25rem;
+    }
+    .erp-card-title {
+        color: #6B7280;
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        line-height: 1.2;
+        text-transform: uppercase;
+    }
+    .erp-card-value {
+        color: #1F2937;
+        font-size: 0.96rem;
+        font-weight: 600;
+        line-height: 1.2;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        text-wrap: pretty;
+    }
+    .erp-card-secondary {
+        color: #9CA3AF;
+        font-size: 0.76rem;
+        line-height: 1.2;
+        min-height: 0;
+        margin-top: 0.15rem;
+    }
+    .erp-kpi-icon {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 0;
+    }
+    .erp-kpi-value {
+        color: #1F2937;
+        font-size: 2rem;
+        line-height: 1.1;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 1 1 auto;
+        min-height: 52px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-family: "Segoe UI", Calibri, Arial, sans-serif;
+    }
+    .erp-kpi-label {
+        color: #475467;
+        font-size: 0.82rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        line-height: 1.2;
+        text-transform: none;
+        font-family: "Segoe UI", Calibri, Arial, sans-serif;
+    }
+    .erp-kpi-subtitle {
+        color: #98A2B3;
+        font-size: 0.74rem;
+        line-height: 1.15;
+        min-height: 14px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-family: "Segoe UI", Calibri, Arial, sans-serif;
+    }
+    [data-testid="stDataFrame"] table td {
+        vertical-align: middle;
+    }
+    .section-title {
+        margin: 6px 0 10px;
+        color: #1F3A5F;
+        font-size: 0.95rem;
+        font-weight: 700;
+    }
+    .export-title {
+        text-align: right;
+        margin-bottom: 0.75rem;
+    }
+    .page-hero {
+        background: linear-gradient(135deg, #ffffff 0%, #eef4fb 100%);
+        border: 1px solid rgba(31, 58, 95, 0.08);
+        border-radius: 16px;
+        box-shadow: 0 10px 24px rgba(31, 58, 95, 0.05);
+        padding: 18px 20px;
+        margin: 0 0 18px;
+    }
+    .page-hero h2 {
+        margin: 0;
+        color: #16324F;
+        font-size: 1.55rem;
+        font-weight: 800;
+    }
+    .page-hero p {
+        margin: 0.35rem 0 0;
+        color: #617285;
+        font-size: 0.96rem;
+    }
+    .operation-card {
+        min-height: 106px;
+    }
+    .scan-shell {
+        background: #FAFBFC;
+        border: 1px solid #E5E7EB;
+        border-radius: 14px;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
+        padding: 14px 14px 2px;
+        margin-bottom: 0;
+    }
+    .lot-banner {
+        background: linear-gradient(135deg, #16324F 0%, #1F4B7A 100%);
+        border-radius: 14px;
+        box-shadow: 0 10px 24px rgba(22, 50, 79, 0.16);
+        padding: 16px 18px;
+        margin: 0 0 16px;
+        color: #FFFFFF;
+    }
+    .lot-banner-label {
+        font-size: 0.76rem;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        opacity: 0.78;
+        text-transform: uppercase;
+    }
+    .lot-banner-value {
+        margin-top: 0.3rem;
+        font-size: 1.35rem;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+    }
+    .lot-banner-meta {
+        margin-top: 0.35rem;
+        font-size: 0.92rem;
+        opacity: 0.9;
+    }
+    .scan-button-spacer {
+        height: 1.85rem;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.fechamento-operacional-anchor) {
+        align-items: stretch;
+        gap: 1rem;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.fechamento-operacional-anchor) > [data-testid="column"]:first-child {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.fechamento-operacional-anchor) > [data-testid="column"]:first-child > div {
+        width: 100%;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.fechamento-operacional-anchor) .stButton > button {
+        min-height: 42px;
+        border-radius: 10px;
+        font-weight: 500;
+    }
+    .fechamento-operacional-caption {
+        margin: 0 0 0.85rem;
+        color: #617285;
+        font-size: 0.82rem;
+        line-height: 1.35;
+    }
+    .fechamento-balcao-title {
+        margin: 0 0 0.4rem;
+        color: #1F3A5F;
+        font-size: 0.92rem;
+        font-weight: 700;
+        line-height: 1.25;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.fechamento-operacional-anchor) [data-testid="column"]:last-child [data-testid="stTextInput"] {
+        margin-bottom: 0.45rem;
+    }
+    .fechamento-operacional-anchor {
+        display: none;
+        height: 0;
+        margin: 0;
+        padding: 0;
+    }
+    .balcao-operacional-box {
+        background: #FFFFFF;
+        border: 1px solid rgba(31, 58, 95, 0.08);
+        border-radius: 12px;
+        padding: 14px 16px;
+        margin: 0 0 12px;
+        box-shadow: 0 4px 14px rgba(31, 58, 95, 0.04);
+    }
+    .balcao-operacional-box .fechamento-balcao-title {
+        margin-bottom: 0.55rem;
+        font-size: 0.95rem;
+    }
+    .balcao-operacional-caption {
+        margin: 0 0 0.85rem;
+        color: #617285;
+        font-size: 0.82rem;
+        line-height: 1.35;
+    }
+    .fechamento-veiculo-box .stButton > button {
+        min-height: 42px;
+        border-radius: 10px;
+        font-weight: 500;
+    }
+    .print-action-button {
+        width: 100%;
+        min-height: 42px;
+        padding: 0 1rem;
+        border-radius: 10px;
+        border: 0;
+        background: #1F3A5F;
+        color: #FFFFFF;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.45rem;
+        font-size: 0.96rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background-color 0.15s ease;
+    }
+    .print-action-button:hover {
+        background: #25486E;
+    }
+    .print-action-button .ui-icon {
+        color: #FFFFFF;
+    }
+    .print-action-button.is-disabled {
+        background: #9AA8B8;
+        cursor: not-allowed;
+    }
+    .print-action-button.is-loading {
+        background: #35597D;
+        cursor: wait;
+    }
+    .table-shell {
+        background: #FFFFFF;
+        padding: 16px;
+        border-radius: 8px;
+        border: 1px solid rgba(31, 58, 95, 0.08);
+        box-shadow: 0 4px 16px rgba(31, 58, 95, 0.04);
+    }
+    .table-shell h3 {
+        margin: 0 0 6px;
+        color: #1F3A5F;
+        font-size: 0.98rem;
+    }
+    .table-shell p {
+        margin: 0 0 16px;
+        color: #617285;
+        font-size: 0.9rem;
+    }
+    .app-shell-header {
+        margin-bottom: 1rem;
+    }
+    .dashboard-hero {
+        background: linear-gradient(135deg, #16324F 0%, #25486E 100%);
+        border-radius: 16px;
+        padding: 22px 24px;
+        color: #FFFFFF;
+        box-shadow: 0 12px 24px rgba(22, 50, 79, 0.14);
+        margin-bottom: 1rem;
+    }
+    .dashboard-hero h1 {
+        margin: 0;
+        font-size: 1.75rem;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+    }
+    .dashboard-hero p {
+        margin: 0.35rem 0 0;
+        font-size: 0.95rem;
+        opacity: 0.9;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.module-card) {
+        align-items: stretch;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.module-card) [data-testid="column"] {
+        display: flex;
+        flex-direction: column;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.module-card) [data-testid="column"] > div {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+    }
+    .module-card-shell {
+        flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
+    .module-card {
+        background: #FFFFFF;
+        border: 1px solid rgba(31, 58, 95, 0.08);
+        border-radius: 14px;
+        padding: 14px 16px 12px;
+        box-shadow: 0 6px 16px rgba(31, 58, 95, 0.05);
+        margin-bottom: 0.5rem;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        box-sizing: border-box;
+        overflow: hidden;
+        flex: 1 1 auto;
+        min-height: 132px;
+        transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+    }
+    .module-card:hover {
+        transform: translateY(-2px);
+        border-color: rgba(46, 111, 149, 0.18);
+        box-shadow: 0 10px 22px rgba(31, 58, 95, 0.09);
+    }
+    .module-card h3 {
+        margin: 0.4rem 0 0.25rem;
+        color: #16324F;
+        font-size: 1.02rem;
+        font-weight: 800;
+        line-height: 1.25;
+        min-height: 0;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+    }
+    .module-card p {
+        margin: 0;
+        color: #617285;
+        font-size: 0.86rem;
+        line-height: 1.45;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        min-height: calc(1.45em * 2);
+        flex: 1 1 auto;
+    }
+    .module-card-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 36px;
+        height: 36px;
+        border-radius: 11px;
+        background: #EEF4FF;
+        color: #1D4ED8;
+        flex-shrink: 0;
+    }
+    .module-card-icon .ui-icon {
+        width: 18px;
+        min-width: 18px;
+        height: 18px;
+        color: inherit;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.module-card) [data-testid="column"] .stButton {
+        margin-top: 0;
+        padding-top: 0;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.module-card) [data-testid="column"] .stButton > button {
+        min-height: 36px;
+        padding: 0.35rem 0.75rem;
+        font-size: 0.92rem;
+        transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+    }
+    div[data-testid="stHorizontalBlock"]:has(.module-card) [data-testid="column"] .stButton > button:hover {
+        transform: translateY(-1px);
+    }
+    .stButton > button,
+    .stDownloadButton > button {
+        border-radius: 8px;
+        min-height: 40px;
+        border: 1px solid rgba(31, 58, 95, 0.14);
+        background: #FFFFFF;
+        color: #1F3A5F;
+        font-weight: 700;
+        box-shadow: none;
+    }
+    .stButton > button:hover,
+    .stDownloadButton > button:hover {
+        border-color: rgba(46, 111, 149, 0.30);
+        color: #1F3A5F;
+    }
+    .stDownloadButton > button {
+        background: #1F3A5F;
+        color: #FFFFFF;
+        border: 0;
+        min-height: 42px;
+        padding-left: 1rem;
+        padding-right: 1rem;
+        font-weight: 500;
+    }
+    .stDownloadButton > button:hover {
+        color: #FFFFFF;
+        background: #25486E;
+    }
+    .stButton > button[kind="primary"],
+    .stFormSubmitButton > button[kind="primary"] {
+        background: #1F3A5F;
+        color: #FFFFFF;
+        border: 1px solid #1F3A5F;
+    }
+    .stButton > button[kind="primary"]:hover,
+    .stFormSubmitButton > button[kind="primary"]:hover {
+        background: #25486E;
+        color: #FFFFFF;
+    }
+    .stTextInput > div > div input {
+        border-radius: 8px;
+    }
+    [data-testid="stSidebar"] {
+        background: #FFFFFF;
+        border-right: 1px solid rgba(31, 58, 95, 0.08);
+    }
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 {
+        color: #1F3A5F;
+    }
+    [data-testid="stSidebar"] label[data-testid="stWidgetLabel"] {
+        color: #516478;
+        font-weight: 500;
+    }
+    [data-testid="stSidebar"] .stFileUploader {
+        padding: 10px;
+        border-radius: 8px;
+        background: #F8FAFC;
+        border: 1px solid rgba(31, 58, 95, 0.08);
+        box-shadow: none;
+    }
+    .sidebar-heading {
+        margin: 0 0 10px;
+        color: #1F3A5F;
+        font-size: 1rem;
+        font-weight: 700;
+    }
+    .sidebar-field-label {
+        margin: 0 0 10px;
+        color: #334155;
+        font-size: 0.95rem;
+        font-weight: 700;
+    }
+    [data-testid="stSidebar"] .stButton > button {
+        background: #1F3A5F;
+        color: #FFFFFF;
+        border: 0;
+    }
+    [data-testid="stSidebar"] .stButton > button:hover {
+        color: #FFFFFF;
+        background: #25486E;
+    }
+    div[data-testid="stAlert"] {
+        border-radius: 8px;
+        border: 1px solid rgba(31, 58, 95, 0.08);
+        box-shadow: none;
+    }
+    div[data-testid="stAlert"] p {
+        font-size: 0.92rem;
+        line-height: 1.55;
+    }
+    @media (max-width: 900px) {
+        .table-shell {
+            padding: 16px;
+        }
+        .dashboard-hero {
+            padding: 18px 20px;
+        }
+        .dashboard-hero h1 {
+            font-size: 1.5rem;
+        }
+        .module-card {
+            min-height: 120px;
+            padding: 12px 14px 10px;
+        }
+        .module-card h3 {
+            font-size: 0.98rem;
+        }
+        .module-card p {
+            font-size: 0.84rem;
+            min-height: calc(1.45em * 2);
+        }
+    }

@@ -392,13 +392,7 @@ def _carregar_extrato_nf_cache(cache_key: str, numero_nf: str, chave_nfe: str) -
 def _restaurar_movimentacoes(payload: tuple[dict[str, Any], ...]) -> list[MovimentacaoNfExtratoRegistro]:
     registros: list[MovimentacaoNfExtratoRegistro] = []
     for item in payload:
-        criado_em_raw = str(item.get("criado_em", "") or "").strip()
-        criado_em = None
-        if criado_em_raw:
-            try:
-                criado_em = datetime.fromisoformat(criado_em_raw)
-            except ValueError:
-                criado_em = None
+        criado_em = SqlAuditoriaNfRepository._parse_criado_em(item.get("criado_em"))
         registros.append(
             MovimentacaoNfExtratoRegistro(
                 fonte=str(item.get("fonte", "") or ""),

@@ -1,0 +1,386 @@
+/* BRIDA TMS — shell: sidebar nativo + area principal */
+
+header[data-testid="stHeader"],
+[data-testid="stToolbar"],
+[data-testid="stDecoration"],
+[data-testid="stStatusWidget"],
+#MainMenu,
+footer {
+    display: none !important;
+}
+
+.stApp {
+    background: #F4F6F9 !important;
+}
+
+.block-container {
+    padding: 1rem 1.5rem 1.5rem !important;
+    max-width: 100% !important;
+}
+
+/* Sidebar nativo Streamlit — navegacao principal */
+[data-testid="stSidebar"] {
+    background: #FFFFFF !important;
+    border-right: 1px solid #E8ECF1 !important;
+}
+
+[data-testid="stSidebar"] > div:first-child {
+    padding-top: 1rem !important;
+    padding-left: 0.85rem !important;
+    padding-right: 0.85rem !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stImage"] {
+    margin-bottom: 0.75rem !important;
+    padding-bottom: 0.85rem !important;
+    border-bottom: 1px solid #EEF2F6 !important;
+}
+
+[data-testid="stSidebar"] .brida-sidebar-nav .stButton {
+    margin: 0 0 4px !important;
+}
+
+[data-testid="stSidebar"] .brida-sidebar-nav .stButton > button {
+    width: 100% !important;
+    justify-content: flex-start !important;
+    text-align: left !important;
+    padding: 0.55rem 0.85rem !important;
+    min-height: 40px !important;
+    border-radius: 8px !important;
+    border: none !important;
+    background: transparent !important;
+    color: #4B5563 !important;
+    font-size: 0.875rem !important;
+    font-weight: 600 !important;
+    box-shadow: none !important;
+}
+
+[data-testid="stSidebar"] .brida-sidebar-nav .stButton > button:hover {
+    background: #F3F6FA !important;
+    color: #16324F !important;
+}
+
+[data-testid="stSidebar"] .brida-sidebar-nav .stButton > button[kind="primary"] {
+    background: #1F3A5F !important;
+    color: #FFFFFF !important;
+}
+
+[data-testid="stSidebar"] .brida-sidebar-nav .stButton > button[kind="primary"]:hover {
+    background: #25486E !important;
+    color: #FFFFFF !important;
+}
+
+[data-testid="stSidebar"] .brida-sidebar-logout {
+    margin-top: 0.75rem !important;
+    padding-top: 0.75rem !important;
+    border-top: 1px solid #EEF2F6 !important;
+}
+
+[data-testid="stSidebar"] .brida-sidebar-logout .stButton > button {
+    border: 1px solid #E2E8F0 !important;
+    color: #64748B !important;
+    background: #FFFFFF !important;
+}
+
+.brida-sidebar-section-title {
+    margin: 0 0 10px;
+    color: #1F3A5F;
+    font-size: 0.9rem;
+    font-weight: 700;
+}
+
+/* Coluna esquerda da Minuta (upload / processar) */
+.brida-upload-column {
+    background: #FFFFFF;
+    border: 1px solid #E8ECF1;
+    border-radius: 10px;
+    padding: 14px 14px 10px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+    min-height: 320px;
+}
+
+.brida-upload-column .ui-section-box {
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    margin: 0 0 10px;
+}
+
+div[data-testid="stHorizontalBlock"]:has(.brida-upload-column) {
+    align-items: flex-start !important;
+}
+
+div[data-testid="stHorizontalBlock"]:has(.brida-upload-column) [data-testid="column"]:last-child {
+    min-width: 0;
+}
+
+/* Topbar — unico cabecalho na area principal */
+.brida-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    background: #FFFFFF;
+    border: 1px solid #E8ECF1;
+    border-radius: 10px;
+    padding: 12px 18px;
+    margin: 0 0 16px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+}
+
+.brida-topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+.brida-topbar-menu-icon {
+    color: #94A3B8;
+    font-size: 1rem;
+}
+
+.brida-topbar-title {
+    margin: 0;
+    color: #111827;
+    font-size: 1.1rem;
+    font-weight: 700;
+    font-family: "Segoe UI", Calibri, Arial, sans-serif;
+}
+
+.brida-topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.brida-topbar-bell {
+    color: #94A3B8;
+    font-size: 0.95rem;
+}
+
+.brida-user-avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: #1F3A5F;
+    color: #FFFFFF;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 700;
+}
+
+.brida-user-meta-block {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+}
+
+.brida-user-meta-name {
+    color: #1F2937;
+    font-size: 0.84rem;
+    font-weight: 700;
+}
+
+.brida-user-meta-role {
+    color: #94A3B8;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.brida-page-subtitle {
+    margin: -8px 0 18px;
+    color: #64748B;
+    font-size: 0.88rem;
+}
+
+.brida-panel-toggle {
+    margin: -8px 0 14px !important;
+}
+
+/* Dashboard e conteudo */
+.brida-dashboard-welcome {
+    margin: 0 0 4px;
+    color: #111827;
+    font-size: 1.45rem;
+    font-weight: 700;
+}
+
+.brida-dashboard-sub {
+    margin: 0 0 18px;
+    color: #64748B;
+    font-size: 0.9rem;
+}
+
+.brida-kpi-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin: 0 0 22px;
+}
+
+.brida-kpi-tile {
+    background: #FFFFFF;
+    border: 1px solid #E8ECF1;
+    border-radius: 10px;
+    padding: 16px 18px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+}
+
+.brida-kpi-tile-value {
+    color: #1F3A5F;
+    font-size: 1.45rem;
+    font-weight: 800;
+    margin: 0;
+}
+
+.brida-kpi-tile-label {
+    color: #64748B;
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin: 6px 0 0;
+}
+
+.brida-section-title {
+    margin: 0 0 14px;
+    color: #1F3A5F;
+    font-size: 0.95rem;
+    font-weight: 700;
+}
+
+.brida-quick-card {
+    background: #FFFFFF;
+    border: 1px solid #E8ECF1;
+    border-radius: 10px;
+    padding: 16px 18px 12px;
+    min-height: 150px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+    margin-bottom: 8px;
+}
+
+.brida-quick-card-icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    background: #EEF4FF;
+    color: #1D4ED8;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.brida-quick-card h3 {
+    margin: 10px 0 6px;
+    color: #16324F;
+    font-size: 0.92rem;
+    font-weight: 700;
+}
+
+.brida-quick-card p {
+    margin: 0;
+    color: #64748B;
+    font-size: 0.82rem;
+    line-height: 1.45;
+}
+
+.brida-quick-link .stButton > button {
+    background: transparent !important;
+    border: none !important;
+    color: #1F3A5F !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    min-height: auto !important;
+    font-size: 0.84rem !important;
+    font-weight: 700 !important;
+    justify-content: flex-start !important;
+}
+
+.brida-content-area {
+    background: #FFFFFF;
+    border: 1px solid #E8ECF1;
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin: 0 0 16px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+}
+
+.brida-filter-shell {
+    background: #FFFFFF;
+    border: 1px solid #E8ECF1;
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin: 0 0 16px;
+}
+
+.brida-export-panel {
+    background: #FAFBFC;
+    border: 1px solid #E8ECF1;
+    border-radius: 10px;
+    padding: 14px 16px;
+}
+
+.brida-users-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+}
+
+.brida-users-table thead th {
+    background: #EEF4FA;
+    color: #1F3A5F;
+    font-weight: 700;
+    text-align: left;
+    padding: 10px 12px;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+}
+
+.brida-users-table tbody td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #EEF2F6;
+}
+
+.brida-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.brida-badge-admin { background: #DBEAFE; color: #1E40AF; }
+.brida-badge-operador { background: #DCFCE7; color: #166534; }
+.brida-badge-ativo { background: #DCFCE7; color: #166534; }
+.brida-badge-inativo { background: #FEE2E2; color: #991B1B; }
+.brida-badge-bloqueado { background: #FEF3C7; color: #92400E; }
+
+.erp-card {
+    border-radius: 10px !important;
+    border: 1px solid #E8ECF1 !important;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04) !important;
+}
+
+.erp-card-kpi-fixed {
+    height: 96px !important;
+    min-height: 96px !important;
+}
+
+.erp-kpi-grid {
+    gap: 14px !important;
+    margin: 0 0 16px !important;
+}
+
+@media (max-width: 1366px) {
+    .brida-kpi-row {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 900px) {
+    .brida-kpi-row {
+        grid-template-columns: 1fr;
+    }
+}

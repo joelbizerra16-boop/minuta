@@ -11,7 +11,21 @@ from reportlab.pdfgen import canvas
 WINDOWS_FONT_DIR = Path("C:/Windows/Fonts")
 
 
+_PDF_FONTS_REGISTERED = False
+
+
 def _register_pdf_fonts() -> tuple[str, str]:
+    global _PDF_FONTS_REGISTERED
+    if _PDF_FONTS_REGISTERED:
+        for font_name, bold_name in (
+            ("Calibri", "Calibri-Bold"),
+            ("Segoe UI", "Segoe UI-Bold"),
+            ("Arial", "Arial-Bold"),
+        ):
+            if font_name in pdfmetrics.getRegisteredFontNames():
+                return font_name, bold_name
+        return "Helvetica", "Helvetica-Bold"
+
     preferred_fonts = [
         ("Calibri", WINDOWS_FONT_DIR / "calibri.ttf", WINDOWS_FONT_DIR / "calibrib.ttf"),
         ("Segoe UI", WINDOWS_FONT_DIR / "segoeui.ttf", WINDOWS_FONT_DIR / "segoeuib.ttf"),
@@ -25,8 +39,10 @@ def _register_pdf_fonts() -> tuple[str, str]:
             bold_font_name = f"{font_name}-Bold"
             if bold_font_name not in pdfmetrics.getRegisteredFontNames():
                 pdfmetrics.registerFont(TTFont(bold_font_name, str(bold_font)))
+            _PDF_FONTS_REGISTERED = True
             return font_name, bold_font_name
 
+    _PDF_FONTS_REGISTERED = True
     return "Helvetica", "Helvetica-Bold"
 
 
@@ -112,9 +128,9 @@ def generate_minuta_entrega_pdf(
         pdf.setFillColor(text_muted)
         pdf.setFont(regular_font, 10)
         second_line_y = y_pos - 22
-        pdf.drawString(left_margin, second_line_y, f"Emissão: {data_emissao or '--'}")
+        pdf.drawString(left_margin, second_line_y, f"Emiss├úo: {data_emissao or '--'}")
         pdf.drawString(left_margin + 220, second_line_y, f"{subject_label}: {numero_documento or '--'}")
-        pdf.drawRightString(right_margin, second_line_y, f"Página: {pdf.getPageNumber()}")
+        pdf.drawRightString(right_margin, second_line_y, f"P├ígina: {pdf.getPageNumber()}")
 
         line_y = second_line_y - 10
         pdf.setStrokeColor(light_line)
@@ -135,7 +151,7 @@ def generate_minuta_entrega_pdf(
         col_2_x = left_margin + 390
 
         draw_label_value(col_1_x, row_one_y, "Transportadora", transportadora, 95)
-        draw_label_value(col_2_x, row_one_y, "Veículo", veiculo or "--", 54)
+        draw_label_value(col_2_x, row_one_y, "Ve├¡culo", veiculo or "--", 54)
         draw_label_value(col_1_x, row_two_y, "Placa", placa_value, 40)
         draw_label_value(col_2_x, row_two_y, "Motorista", motorista_value, 62)
         return y_pos - block_height - section_gap
@@ -148,7 +164,7 @@ def generate_minuta_entrega_pdf(
         pdf.setFont(bold_font, 10)
         pdf.drawString(columns["nota"]["x"] + 8, y_pos - 15, "NF")
         pdf.drawString(columns["item"]["x"] + 8, y_pos - 15, "Vol")
-        pdf.drawString(columns["emissao"]["x"] + 8, y_pos - 15, "Emissão")
+        pdf.drawString(columns["emissao"]["x"] + 8, y_pos - 15, "Emiss├úo")
         pdf.drawString(columns["cliente"]["x"] + 8, y_pos - 15, "Cliente")
         pdf.drawString(columns["cidade"]["x"] + 8, y_pos - 15, "Cidade")
         pdf.drawString(columns["uf"]["x"] + 8, y_pos - 15, "UF")
