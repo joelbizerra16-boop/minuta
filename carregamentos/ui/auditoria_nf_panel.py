@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,6 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from carregamentos.bootstrap import get_analise_operacional_service
+from carregamentos.integration import get_operacional_diagnostico
 from carregamentos.models.auditoria_nf import (
     AuditoriaNfLote,
     NfAuditoriaCard,
@@ -35,13 +37,12 @@ from utils.streamlit_tables import build_auditoria_nf_expansion_column_config
 # Cada linha: tuple de pares (coluna, valor) — hashavel para @st.cache_data.
 ProcessedDfPayload = tuple[tuple[tuple[str, Any], ...], ...]
 
-_MAIN_COL_WEIGHTS = [0.07, 0.17, 0.09, 0.10, 0.08, 0.07, 0.06, 0.07, 0.03]
+_MAIN_COL_WEIGHTS = [0.08, 0.22, 0.10, 0.12, 0.08, 0.06, 0.10, 0.03]
 _MAIN_HEADERS = [
     "NF",
     "Cliente",
     "Situacao",
     "Ultima Operacao",
-    "Carregamento",
     "Data",
     "Hora",
     "Usuario",
@@ -141,6 +142,17 @@ def _carregar_auditoria_nf_cache(cache_key: str, processed_df_payload: Processed
     return auditoria.to_dict()
 
 
+def _lista_session_key(cache_key: str, scope: str) -> str:
+    return f"auditoria_nf_lista_{scope}_{cache_key}"
+
+
+def _clear_expanded_rows(cache_key: str, scope: str) -> None:
+    prefix = f"auditoria_nf_expanded_{scope}_{cache_key}_"
+    for key in list(st.session_state.keys()):
+        if str(key).startswith(prefix):
+            st.session_state.pop(key, None)
+
+
 def render_auditoria_nf_expander(*, processed_df) -> None:
     if processed_df is None or processed_df.empty:
         return
@@ -159,9 +171,7 @@ def render_auditoria_nf_expander(*, processed_df) -> None:
             ):
                 st.session_state[session_token] = True
                 st.rerun()
-            st.caption(
-                "Consulta opcional do historico completo de cada NF da planilha importada."
-            )
+            st.caption("Consulta opcional. A listagem so e carregada ao solicitar.")
             return
 
         with st.spinner("Carregando historico operacional das NFs..."):
@@ -171,60 +181,122 @@ def render_auditoria_nf_expander(*, processed_df) -> None:
             return
 
         auditoria = AuditoriaNfLote.from_dict(data)
+        st.markdown('<div class="nf-historico-compacto">', unsafe_allow_html=True)
         _render_nf_listview(auditoria, cache_key=cache_key, scope="expander")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_historico_nfs_contexto(processed_df, *, scope: str = "painel") -> bool:
-    """Exibe listagem por NF para apoio a decisao operacional. Retorna True se renderizou."""
+    """Resumo simples e listagem sob demanda para apoio a decisao operacional."""
     if processed_df is None or processed_df.empty:
+        return False
+
+    diagnostico = get_operacional_diagnostico()
+    if diagnostico is None or diagnostico.nfs_existentes <= 0:
         return False
 
     payload = _serialize_processed_df(processed_df)
     cache_key = _cache_key_from_payload(payload)
-    data = _carregar_auditoria_nf_cache(cache_key, payload)
-    if not data:
-        return False
+    lista_key = _lista_session_key(cache_key, scope)
 
-    auditoria = AuditoriaNfLote.from_dict(data)
-    cards_com_historico = [
-        card for card in auditoria.cards if card.quantidade_utilizacoes > 0 or card.eventos
-    ]
-    if not cards_com_historico:
-        return False
+    st.markdown('<div class="nf-historico-compacto">', unsafe_allow_html=True)
+    _render_resumo_simples(diagnostico)
+    _render_acoes_historico(cache_key=cache_key, scope=scope, lista_key=lista_key)
 
-    st.markdown("**Historico por Nota Fiscal**")
-    st.markdown('<div class="nf-historico-fullwidth">', unsafe_allow_html=True)
-    _render_resumo_planilha(auditoria)
-    _render_nf_listview(auditoria, cache_key=cache_key, scope=scope)
+    if st.session_state.get(lista_key):
+        with st.spinner("Carregando historico das notas fiscais..."):
+            data = _carregar_auditoria_nf_cache(cache_key, payload)
+        if not data:
+            st.warning("Nao foi possivel carregar o historico das notas fiscais.")
+        else:
+            auditoria = AuditoriaNfLote.from_dict(data)
+            _render_nf_listview(auditoria, cache_key=cache_key, scope=scope)
+
     st.markdown("</div>", unsafe_allow_html=True)
     return True
 
 
-def _render_resumo_planilha(auditoria: AuditoriaNfLote) -> None:
-    cards = auditoria.cards
-    excel_nome = str(st.session_state.get("operacional_excel_nome", "") or "Planilha importada")
-    nfs_novas = sum(1 for card in cards if "Nunca utilizada" in card.situacao_atual)
-    nfs_utilizadas = sum(1 for card in cards if "Ja utilizada" in card.situacao_atual)
-    total_complementacoes = sum(card.resumo.total_complementacoes for card in cards)
-    total_reentregas = sum(card.resumo.total_reentregas for card in cards)
+def _render_resumo_simples(diagnostico) -> None:
+    st.markdown(
+        '<p class="nf-historico-mensagem">Foram encontradas NFs com historico operacional.</p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div class="nf-historico-resumo-linhas">
+            <div class="nf-historico-resumo-linha">
+                <span>Total de NFs</span><strong>{diagnostico.nfs_total}</strong>
+            </div>
+            <div class="nf-historico-resumo-linha">
+                <span>NFs novas</span><strong>{diagnostico.nfs_novas}</strong>
+            </div>
+            <div class="nf-historico-resumo-linha">
+                <span>NFs com historico</span><strong>{diagnostico.nfs_existentes}</strong>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    col_planilha, col_total, col_novas, col_usadas, col_comp, col_reent = st.columns(6, gap="medium")
-    col_planilha.metric("Planilha", excel_nome[:40] + ("..." if len(excel_nome) > 40 else ""))
-    col_total.metric("Total de NFs", len(cards))
-    col_novas.metric("NFs novas", nfs_novas)
-    col_usadas.metric("NFs utilizadas", nfs_utilizadas)
-    col_comp.metric("Complementacoes", total_complementacoes)
-    col_reent.metric("Reentregas", total_reentregas)
-    st.caption(f"Consulta realizada em {auditoria.data_consulta}")
+
+def _render_acoes_historico(*, cache_key: str, scope: str, lista_key: str) -> None:
+    col_continuar, col_visualizar = st.columns(2, gap="small")
+    with col_continuar:
+        if st.button(
+            "Continuar processamento",
+            key=f"btn_nf_continuar_{scope}_{cache_key}",
+            use_container_width=True,
+            type="primary",
+        ):
+            st.session_state.pop(lista_key, None)
+            _clear_expanded_rows(cache_key, scope)
+            st.session_state[f"auditoria_nf_foco_decisao_{scope}"] = True
+            st.rerun()
+    with col_visualizar:
+        if st.button(
+            "Visualizar historico",
+            key=f"btn_nf_visualizar_{scope}_{cache_key}",
+            use_container_width=True,
+            type="secondary",
+        ):
+            st.session_state[lista_key] = True
+            st.rerun()
+
+
+def _card_tem_historico(card: NfAuditoriaCard) -> bool:
+    if card.quantidade_utilizacoes > 0 or card.eventos:
+        return True
+    return "Ja utilizada" in card.situacao_atual
+
+
+def _render_cliente_cell(cliente: str) -> None:
+    texto = str(cliente or "--").strip() or "--"
+    safe = html.escape(texto)
+    st.markdown(
+        f'<span class="nf-cliente-cell" title="{safe}">{safe}</span>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_situacao_cell(card: NfAuditoriaCard) -> None:
+    label = _situacao_display(card)
+    if label in {"Ja utilizada", "Reentrega"}:
+        st.markdown(
+            f'<span class="nf-badge-utilizada">{html.escape(label)}</span>',
+            unsafe_allow_html=True,
+        )
+        return
+    st.write(label)
 
 
 def _render_nf_listview(auditoria: AuditoriaNfLote, *, cache_key: str, scope: str = "expander") -> None:
-    cards = sorted(auditoria.cards, key=lambda item: item.nf)
+    cards = sorted(
+        auditoria.cards,
+        key=lambda item: (0 if _card_tem_historico(item) else 1, item.nf),
+    )
     _render_listview_header()
     for index, card in enumerate(cards):
         _render_listview_row(card, cache_key=cache_key, row_index=index, scope=scope)
-        if index < len(cards) - 1:
-            st.divider()
 
 
 def _render_listview_header() -> None:
@@ -244,28 +316,26 @@ def _render_listview_row(
 ) -> None:
     state_key = _expanded_state_key(cache_key, card.token, scope)
     expanded = bool(st.session_state.get(state_key, False))
-    ultima_operacao, ultimo_carregamento, ultima_data, ultima_hora, ultimo_usuario = (
-        _resumo_linha_principal(card)
-    )
+    ultima_operacao, _, ultima_data, ultima_hora, ultimo_usuario = _resumo_linha_principal(card)
+    row_class = "nf-row-utilizada" if _card_tem_historico(card) else "nf-row-nova"
+    st.markdown(f'<div class="{row_class} nf-listview-row">', unsafe_allow_html=True)
 
     row_cols = st.columns(_MAIN_COL_WEIGHTS, gap="small")
     with row_cols[0]:
         st.write(card.nf)
     with row_cols[1]:
-        st.write(card.cliente)
+        _render_cliente_cell(card.cliente)
     with row_cols[2]:
-        st.write(_situacao_display(card))
+        _render_situacao_cell(card)
     with row_cols[3]:
         st.write(ultima_operacao)
     with row_cols[4]:
-        st.write(ultimo_carregamento)
-    with row_cols[5]:
         st.write(ultima_data)
-    with row_cols[6]:
+    with row_cols[5]:
         st.write(ultima_hora)
-    with row_cols[7]:
+    with row_cols[6]:
         st.write(ultimo_usuario)
-    with row_cols[8]:
+    with row_cols[7]:
         toggle_label = "▼" if expanded else "▶"
         if st.button(
             toggle_label,
@@ -281,6 +351,8 @@ def _render_listview_row(
 
     if expanded:
         _render_history_listview(card, cache_key=cache_key)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _resolver_identificadores_nf(card: NfAuditoriaCard) -> tuple[str, str]:

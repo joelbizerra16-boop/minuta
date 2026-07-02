@@ -1,6 +1,8 @@
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime
 from collections import Counter
+from typing import Callable
 import base64
 import html
 from io import BytesIO
@@ -28,16 +30,60 @@ import streamlit.components.v1 as components
 from utils.gerador_minuta import generate_minuta_entrega_pdf
 from utils.minuta_carregamento import (
     MINUTA_CARREGAMENTO_CONFIG,
-    MINUTA_ENTREGA_CONFIG,
     MINUTA_MODULES,
     MinutaModuleConfig,
 )
+from core.bootstrap import configure_application_storage
+from core.performance import (
+    build_performance_report,
+    bump_processed_data_version,
+    invalidate_balcao_lookup_cache,
+    invalidate_latest_closed_lote_pdf_cache,
+    measure,
+)
+from auth.pages.login import render_login_page
+from auth.pages.usuarios import render_usuarios_page
+from auth.security.session import clear_session_on_logout, is_admin, is_logged_in, require_admin
+from carregamentos.integration import (
+    DECISAO_OPERACIONAL_LABELS,
+    cancelar_operacao_pendente,
+    clear_balcao_pending,
+    clear_contexto_operacional,
+    clear_reentrega_pending,
+    clear_reimpressao_pending,
+    executar_analise_operacional,
+    executar_fechamento_balcao_para_pdf,
+    executar_fechamento_veiculo_para_pdf,
+    get_operacional_decisao,
+    get_operacional_diagnostico,
+    iniciar_entrega_balcao,
+    on_baixar_pdf_click,
+    on_processing_panel_primary_click,
+    on_processing_panel_secondary_click,
+    persistir_pdfs_apos_fechamento,
+    render_balcao_nf_preview,
+    resolve_operational_panel_mode,
+    sync_processing_context_for_excel,
+)
+from carregamentos.models.operacional import DecisaoOperacional
+from carregamentos.ui.auditoria_nf_panel import render_auditoria_nf_expander, render_historico_nfs_contexto
+from carregamentos.pages.consulta import render_consulta_carregamentos_page
+from carregamentos.services.nf_validation import localizar_nf_no_lote
+from infrastructure.storage.config_storage import (
+    CONFIG_CHAVE_CLASSIFICACAO_PRODUTOS,
+    CONFIG_CHAVE_LOTES,
+    CONFIG_CHAVE_SEPARACAO,
+    CONFIG_CHAVE_SEPARACAO_EXCLUIDOS,
+    SqlJsonConfigStorage,
+)
+from infrastructure.storage.xml_storage import SqlXmlRecordRepository
+
+_CONFIG_STORAGE = SqlJsonConfigStorage()
 
 BASE_DIR = Path(__file__).resolve().parent
 FIXED_LOGO_PATH = BASE_DIR / "baixados.png"
 WINDOWS_FONT_DIR = Path("C:/Windows/Fonts")
 DATA_DIR = BASE_DIR / "data"
-PRACAS_JSON_PATH = DATA_DIR / "pracas.json"
 XMLS_PROCESSADOS_JSON_PATH = DATA_DIR / "xmls_processados.json"
 CLASSIFICACAO_PRODUTOS_JSON_PATH = DATA_DIR / "classificacao_produtos.json"
 SEPARACAO_JSON_PATH = DATA_DIR / "separacao.json"
@@ -130,6 +176,12 @@ SECTOR_NAME_ALIASES = {
     "SEM SETOR": "Não Identificados",
 }
 UNDEFINED_ROUTE_LABEL = "NÃO DEFINIDA"
+MAX_XML_UPLOAD_BATCH = 2000
+ROUTE_FROM_INF_CPL_PATTERN = re.compile(r"(?im)(?:^|[\s\-])rota\s*:\s*([^\n\r]+)")
+ROUTE_NEXT_FIELD_PATTERN = re.compile(
+    r"\s+-\s+(?:Pedido|Cliente|Vendedor|Trib|Valor|ICMS|CNPJ)\s*:.*$",
+    re.IGNORECASE,
+)
 DEFAULT_PRODUCT_CLASSIFICATION_RULES = [
     {"palavra_chave": "OLEO", "setor": "Lubrificantes"},
     {"palavra_chave": "MOBIL", "setor": "Lubrificantes"},
@@ -154,16 +206,13 @@ PDF_FONT_REGULAR = "Helvetica"
 PDF_FONT_BOLD = "Helvetica-Bold"
 PDF_FONT_MONO = "Courier"
 PDF_FONT_MONO_BOLD = "Courier-Bold"
-LOGIN_USERNAME = "minuta"
-LOGIN_PASSWORD = "minuta123"
-AUTH_QUERY_PARAM = "auth"
-AUTH_QUERY_VALUE = "1"
 SCREEN_LOGIN = "login"
 SCREEN_MENU = "menu"
 SCREEN_MINUTA = "minuta"
-SCREEN_ENTREGA = "minuta_entrega"
 SCREEN_SEPARACAO = "separacao"
 SCREEN_LOTES = "lotes"
+SCREEN_USUARIOS = "usuarios"
+SCREEN_CONSULTA_CARREGAMENTOS = "consulta_carregamentos"
 ICON_MAP = {
     "dados_gerais": "folder",
     "filial": "building",
@@ -186,6 +235,9 @@ ICON_MAP = {
     "barcode": "receipt",
     "status_operacional": "chart",
     "lotes": "box",
+    "usuarios": "user_badge",
+    "cadastro_usuarios": "sheet",
+    "consulta_carregamentos": "truck",
 }
 
 ICON_SVG = {
@@ -207,7 +259,16 @@ ICON_SVG = {
 }
 
 
+_PDF_FONTS_READY = False
+
+
 def register_pdf_fonts() -> tuple[str, str]:
+    global _PDF_FONTS_READY
+    if _PDF_FONTS_READY:
+        if "Arial" in pdfmetrics.getRegisteredFontNames():
+            return "Arial", "Arial-Bold"
+        return PDF_FONT_REGULAR, PDF_FONT_BOLD
+
     regular_font = WINDOWS_FONT_DIR / "arial.ttf"
     bold_font = WINDOWS_FONT_DIR / "arialbd.ttf"
 
@@ -216,8 +277,10 @@ def register_pdf_fonts() -> tuple[str, str]:
             pdfmetrics.registerFont(TTFont("Arial", str(regular_font)))
         if "Arial-Bold" not in pdfmetrics.getRegisteredFontNames():
             pdfmetrics.registerFont(TTFont("Arial-Bold", str(bold_font)))
+        _PDF_FONTS_READY = True
         return "Arial", "Arial-Bold"
 
+    _PDF_FONTS_READY = True
     return PDF_FONT_REGULAR, PDF_FONT_BOLD
 
 
@@ -225,7 +288,14 @@ def get_logo_path() -> Path | None:
     return FIXED_LOGO_PATH if FIXED_LOGO_PATH.is_file() else None
 
 
+_LOGO_DATA_URI_CACHE: str | None = None
+
+
 def get_logo_data_uri() -> str:
+    global _LOGO_DATA_URI_CACHE
+    if _LOGO_DATA_URI_CACHE is not None:
+        return _LOGO_DATA_URI_CACHE
+
     logo_path = get_logo_path()
     if logo_path is None:
         return ""
@@ -238,7 +308,8 @@ def get_logo_data_uri() -> str:
         mime_type = "image/webp"
 
     encoded_logo = base64.b64encode(logo_path.read_bytes()).decode("ascii")
-    return f"data:{mime_type};base64,{encoded_logo}"
+    _LOGO_DATA_URI_CACHE = f"data:{mime_type};base64,{encoded_logo}"
+    return _LOGO_DATA_URI_CACHE
 
 
 def render_floating_logo() -> None:
@@ -279,25 +350,6 @@ def render_floating_logo() -> None:
     """,
         unsafe_allow_html=True,
     )
-
-
-def update_pracas_json(uploaded_file) -> str:
-    try:
-        uploaded_file.seek(0)
-        pracas_df = pd.read_excel(uploaded_file)
-        uploaded_file.seek(0)
-    except Exception as exc:
-        raise ValueError(f"Erro ao ler o arquivo de pracas: {exc}") from exc
-
-    json_content = pracas_df.to_json(orient="records", force_ascii=False, date_format="iso")
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    if PRACAS_JSON_PATH.exists():
-        PRACAS_JSON_PATH.unlink()
-
-    PRACAS_JSON_PATH.write_text(json_content, encoding="utf-8")
-    load_pracas_lookup.clear()
-    return "Praças atualizadas com sucesso"
 
 
 def normalize_praca_name(value: object) -> str:
@@ -349,60 +401,52 @@ def normalize_sector_name(value: object) -> str:
     return SECTOR_NAME_ALIASES.get(normalized, "")
 
 
-@st.cache_data(show_spinner=False)
-def load_pracas_lookup(json_path: str) -> dict[str, str]:
-    path = Path(json_path)
-    if not path.is_file():
-        return {}
-
-    try:
-        pracas_df = pd.read_json(path)
-    except ValueError:
-        return {}
-
-    if pracas_df.empty or "PRACA" not in pracas_df.columns or "ROTA" not in pracas_df.columns:
-        return {}
-
-    normalized_df = pracas_df[["PRACA", "ROTA"]].copy()
-    normalized_df["PRACA"] = normalized_df["PRACA"].map(normalize_praca_name)
-    normalized_df["ROTA"] = normalized_df["ROTA"].fillna(UNDEFINED_ROUTE_LABEL).astype(str).str.strip()
-    normalized_df = normalized_df[normalized_df["PRACA"] != ""]
-    normalized_df["ROTA"] = normalized_df["ROTA"].replace("", UNDEFINED_ROUTE_LABEL)
-
-    return dict(zip(normalized_df["PRACA"], normalized_df["ROTA"]))
+def normalize_route_label(value: object) -> str:
+    route = re.sub(r"\s+", " ", str(value or "").strip())
+    return route or UNDEFINED_ROUTE_LABEL
 
 
-def apply_routes_to_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
+def extract_route_from_inf_cpl(inf_cpl: object) -> str:
+    text = str(inf_cpl or "").replace("\\n", "\n")
+    if not text.strip():
+        return ""
+
+    match = ROUTE_FROM_INF_CPL_PATTERN.search(text)
+    if not match:
+        return ""
+
+    route_value = match.group(1).strip()
+    route_value = ROUTE_NEXT_FIELD_PATTERN.sub("", route_value).strip()
+    return route_value
+
+
+def ensure_route_column(dataframe: pd.DataFrame) -> pd.DataFrame:
     updated_df = dataframe.copy()
-
     if "ROTA" not in updated_df.columns:
         updated_df["ROTA"] = UNDEFINED_ROUTE_LABEL
-
-    if updated_df.empty:
         return updated_df
 
-    if "Municipio" not in updated_df.columns:
-        updated_df["ROTA"] = UNDEFINED_ROUTE_LABEL
-        return updated_df
-
-    route_lookup = load_pracas_lookup(str(PRACAS_JSON_PATH))
-    if not route_lookup:
-        updated_df["ROTA"] = UNDEFINED_ROUTE_LABEL
-        return updated_df
-
-    normalized_municipios = updated_df["Municipio"].map(normalize_praca_name)
-    updated_df["ROTA"] = normalized_municipios.map(route_lookup).fillna(UNDEFINED_ROUTE_LABEL)
+    updated_df["ROTA"] = updated_df["ROTA"].map(normalize_route_label)
     return updated_df
 
 
-def get_route_for_municipio(value: object) -> str:
-    normalized = normalize_praca_name(value)
-    if not normalized:
-        return UNDEFINED_ROUTE_LABEL
-    route_lookup = load_pracas_lookup(str(PRACAS_JSON_PATH))
-    if not route_lookup:
-        return UNDEFINED_ROUTE_LABEL
-    return route_lookup.get(normalized, UNDEFINED_ROUTE_LABEL)
+def apply_routes_from_xml_index(dataframe: pd.DataFrame, xml_index: dict[str, dict[str, object]]) -> pd.DataFrame:
+    updated_df = dataframe.copy()
+    if updated_df.empty:
+        return ensure_route_column(updated_df)
+
+    route_lookup: dict[str, str] = {}
+    for key, xml_data in (xml_index or {}).items():
+        nf_key = normalize_nf(xml_data.get("nf_normalizada", "") or xml_data.get("NF", "") or key)
+        if nf_key:
+            route_lookup[nf_key] = normalize_route_label(xml_data.get("ROTA", ""))
+
+    if "NF" in updated_df.columns:
+        updated_df["ROTA"] = updated_df["NF"].map(normalize_nf).map(route_lookup)
+    else:
+        updated_df["ROTA"] = UNDEFINED_ROUTE_LABEL
+
+    return ensure_route_column(updated_df)
 
 
 def get_sector_colors(setor: str) -> dict[str, str]:
@@ -410,7 +454,29 @@ def get_sector_colors(setor: str) -> dict[str, str]:
 
 
 def render_label_icon(icon_name: str) -> str:
-    return f'<span class="ui-icon" aria-hidden="true">{ICON_SVG[icon_name]}</span>'
+    raw_svg = ICON_SVG.get(icon_name, ICON_SVG["folder"])
+    return f'<span class="ui-icon" aria-hidden="true">{_normalize_icon_svg(raw_svg)}</span>'
+
+
+def _normalize_icon_svg(svg_markup: str) -> str:
+    """Atributos intrinsecos de tamanho e traco — icones corretos mesmo sem o bloco CSS no DOM."""
+    if 'data-brida-icon="true"' in svg_markup:
+        return svg_markup
+    normalized = svg_markup.replace(
+        '<svg viewBox="0 0 20 20"',
+        (
+            '<svg data-brida-icon="true" viewBox="0 0 20 20" '
+            'width="16" height="16" '
+            'fill="none" stroke="currentColor" stroke-width="1.7" '
+            'stroke-linecap="round" stroke-linejoin="round"'
+        ),
+        1,
+    )
+    return normalized.replace("<path d=", '<path fill="none" stroke="currentColor" d=')
+
+
+def resolve_menu_icon(icon_key: str) -> str:
+    return ICON_MAP.get(str(icon_key or "").strip(), ICON_MAP["dados_gerais"])
 
 
 def normalize_label(value: object) -> str:
@@ -577,56 +643,13 @@ def build_default_product_classification_records() -> list[dict[str, str]]:
     return sorted(records, key=lambda record: (-len(record["palavra_chave"]), record["palavra_chave"]))
 
 
-def update_classificacao_produtos_json(uploaded_file) -> str:
-    try:
-        uploaded_file.seek(0)
-        classificacao_df = pd.read_excel(uploaded_file)
-        uploaded_file.seek(0)
-    except Exception as exc:
-        raise ValueError(f"Erro ao ler o arquivo de classificacao de produtos: {exc}") from exc
-
-    keyword_column = find_column(
-        list(classificacao_df.columns),
-        ["Palavra Chave", "Palavra-chave", "Palavra", "Keyword", "Descricao", "Produto", "Chave"],
-    )
-    sector_column = find_column(
-        list(classificacao_df.columns),
-        ["Setor", "Classificacao", "Classificação", "Categoria", "Grupo"],
-    )
-
-    if keyword_column is None or sector_column is None:
-        raise ValueError("A planilha precisa conter colunas de palavra-chave e setor para a classificacao.")
-
-    records: dict[str, dict[str, str]] = {}
-    for _, row in classificacao_df.iterrows():
-        keyword = normalize_matching_text(row.get(keyword_column, ""))
-        sector = normalize_sector_name(row.get(sector_column, ""))
-        if keyword and sector:
-            records[keyword] = {"palavra_chave": keyword, "setor": sector}
-
-    if not records:
-        raise ValueError("Nenhuma regra valida foi encontrada na planilha de classificacao.")
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    CLASSIFICACAO_PRODUTOS_JSON_PATH.write_text(
-        json.dumps(sorted(records.values(), key=lambda record: (-len(record["palavra_chave"]), record["palavra_chave"])), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    carregar_classificacao_produtos_json.clear()
-    return f"Classificacao de produtos atualizada com {len(records)} regra(s)."
-
-
 @st.cache_data(show_spinner=False)
-def carregar_classificacao_produtos_json(json_path: str, version_token: int = 0) -> tuple[list[dict[str, str]], str]:
-    _ = version_token
+def carregar_classificacao_produtos_records(json_path: str, version_token: int = 0) -> tuple[list[dict[str, str]], str]:
+    _ = (json_path, version_token)
     default_records = build_default_product_classification_records()
-    path = Path(json_path)
-    if not path.is_file():
-        return default_records, ""
-
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        payload = _CONFIG_STORAGE.load_list(CONFIG_CHAVE_CLASSIFICACAO_PRODUTOS, default=[])
+    except Exception as exc:
         return default_records, f"A base de classificacao nao pôde ser lida ({exc}). Foi usada a base padrao do sistema."
 
     if not isinstance(payload, list):
@@ -647,12 +670,8 @@ def carregar_classificacao_produtos_json(json_path: str, version_token: int = 0)
     return sorted(records.values(), key=lambda record: (-len(record["palavra_chave"]), record["palavra_chave"])), ""
 
 
-def get_classificacao_storage_status() -> tuple[bool, str]:
-    if not CLASSIFICACAO_PRODUTOS_JSON_PATH.is_file():
-        return False, "Usando base padrao do sistema"
-
-    updated_at = datetime.fromtimestamp(CLASSIFICACAO_PRODUTOS_JSON_PATH.stat().st_mtime)
-    return True, format_datetime_display(updated_at)
+def carregar_classificacao_produtos_json(json_path: str, version_token: int = 0) -> tuple[list[dict[str, str]], str]:
+    return carregar_classificacao_produtos_records(json_path, version_token)
 
 
 def classify_product_sector(description: object, classification_records: list[dict[str, str]]) -> str:
@@ -845,7 +864,7 @@ def summarize_metadata(base_df: pd.DataFrame) -> dict[str, str]:
     }
 
 
-def detect_excel_structure(uploaded_excel) -> tuple[str, int | None, int | None]:
+def detect_excel_structure(uploaded_excel) -> tuple[str, int | None, int | None, pd.DataFrame]:
     workbook = pd.ExcelFile(uploaded_excel)
     uploaded_excel.seek(0)
 
@@ -856,6 +875,7 @@ def detect_excel_structure(uploaded_excel) -> tuple[str, int | None, int | None]
     best_detail_row = None
     best_overview_score = -1
     best_detail_score = -1
+    best_preview_df = pd.DataFrame()
 
     for sheet_name in workbook.sheet_names:
         preview_df = pd.read_excel(workbook, sheet_name=sheet_name, header=None, nrows=20)
@@ -873,12 +893,14 @@ def detect_excel_structure(uploaded_excel) -> tuple[str, int | None, int | None]
                 best_detail_score = detail_score
                 best_sheet = sheet_name
                 best_detail_row = row_index
+                best_preview_df = preview_df
 
             if overview_score > best_overview_score:
                 best_overview_score = overview_score
                 best_overview_row = row_index
 
-    return best_sheet, best_detail_row, best_overview_row
+    uploaded_excel.seek(0)
+    return best_sheet, best_detail_row, best_overview_row, best_preview_df
 
 
 def extract_summary_metadata(preview_df: pd.DataFrame, overview_row: int | None) -> dict[str, str]:
@@ -946,9 +968,7 @@ def summarize_filial(base_df: pd.DataFrame) -> str:
 
 def load_excel_base(uploaded_excel) -> pd.DataFrame:
     try:
-        sheet_name, detail_header_row, overview_row = detect_excel_structure(uploaded_excel)
-        preview_df = pd.read_excel(uploaded_excel, sheet_name=sheet_name, header=None, nrows=20)
-        uploaded_excel.seek(0)
+        sheet_name, detail_header_row, overview_row, preview_df = detect_excel_structure(uploaded_excel)
 
         if detail_header_row is None:
             raise ValueError("Nao foi possivel localizar a tabela detalhada de notas no Excel.")
@@ -1079,6 +1099,8 @@ def parse_xml_file(uploaded_xml) -> dict[str, object]:
         or find_xml_text_by_localname(root, ["vNF"])
         or "0"
     )
+    inf_cpl = find_xml_text_by_localname(root, ["infCpl"]) or xml_text_any_namespace(root, ".//{*}infCpl")
+    rota = extract_route_from_inf_cpl(inf_cpl)
 
     volume_total = 0.0
     peso_total = 0.0
@@ -1121,6 +1143,7 @@ def parse_xml_file(uploaded_xml) -> dict[str, object]:
         "Status": status,
         "StatusNF": status,
         "ValorNF": valor_total,
+        "ROTA": rota,
         "VolumeTotal": volume_total,
         "PesoTotal": peso_total,
         "Items": items,
@@ -1204,7 +1227,7 @@ def build_minuta_entrega_records(dataframe: pd.DataFrame) -> tuple[list[dict[str
 
     valid_rows = dataframe[dataframe["Status"].map(is_authorized_nf_status)].copy()
     if valid_rows.empty:
-        return [], ["Nenhuma NF autorizada esta disponivel para gerar a minuta de entrega."], {"total_volumes": 0.0, "total_peso": 0.0, "total_valor": 0.0, "total_nfs": 0}
+        return [], ["Nenhuma NF autorizada esta disponivel para gerar o romaneio de entrega."], {"total_volumes": 0.0, "total_peso": 0.0, "total_valor": 0.0, "total_nfs": 0}
 
     issues: list[str] = []
     entrega_records: list[dict[str, object]] = []
@@ -1282,44 +1305,6 @@ def build_minuta_entrega_records(dataframe: pd.DataFrame) -> tuple[list[dict[str
     return entrega_records, issues, totals
 
 
-def build_delivery_table_dataframe(records: list[dict[str, object]]) -> pd.DataFrame:
-    table_df = pd.DataFrame(records)
-    if table_df.empty:
-        return pd.DataFrame(columns=["Nota", "Vol", "Emissao", "Cliente", "Cidade", "UF", "Valor", "Peso", "Rota"])
-
-    table_df = table_df.rename(
-        columns={
-            "nota": "Nota",
-            "item": "Vol",
-            "data": "Emissao",
-            "cliente": "Cliente",
-            "cidade": "Cidade",
-            "uf": "UF",
-            "valor": "Valor",
-            "peso": "Peso",
-            "rota": "Rota",
-        }
-    )
-    table_df["Vol"] = table_df["Vol"].apply(format_quantity_display)
-    table_df["Cliente"] = table_df["Cliente"].apply(lambda value: wrap_table_text(value, 34))
-    table_df["Cidade"] = table_df["Cidade"].apply(lambda value: wrap_table_text(value, 18))
-    return table_df[["Nota", "Vol", "Emissao", "Cliente", "Cidade", "UF", "Valor", "Peso", "Rota"]]
-
-
-def build_delivery_table_column_config() -> dict[str, object]:
-    return {
-        "Nota": st.column_config.TextColumn("Nota", width="small"),
-        "Vol": st.column_config.TextColumn("Vol", width="small"),
-        "Emissao": st.column_config.TextColumn("Emissao", width="small"),
-        "Cliente": st.column_config.TextColumn("Cliente", width="large"),
-        "Cidade": st.column_config.TextColumn("Cidade", width="medium"),
-        "UF": st.column_config.TextColumn("UF", width="small"),
-        "Valor": st.column_config.NumberColumn("Valor", format="R$ %.2f", width="small"),
-        "Peso": st.column_config.NumberColumn("Peso", format="%.3f kg", width="small"),
-        "Rota": st.column_config.TextColumn("Rota", width="medium"),
-    }
-
-
 def process_minuta_inputs(process_clicked: bool, xml_records: list, excel_file) -> None:
     if not process_clicked:
         return
@@ -1328,30 +1313,40 @@ def process_minuta_inputs(process_clicked: bool, xml_records: list, excel_file) 
         st.error("Envie um arquivo Excel para iniciar o processamento.")
         return
 
+    clear_contexto_operacional()
+
     try:
-        excel_base = load_excel_base(excel_file)
-        processed_df, summary, issues, nf_debug = integrate_excel_with_xml(excel_base, xml_records or [])
+        with measure("process.load_excel"):
+            excel_base = load_excel_base(excel_file)
+        st.session_state["operacional_excel_nome"] = str(getattr(excel_file, "name", "") or "")
+        with measure("process.integrate_excel_xml"):
+            processed_df, summary, issues, nf_debug = integrate_excel_with_xml(excel_base, xml_records or [])
         st.session_state.processed_df = processed_df
         st.session_state.summary = summary
         st.session_state.issues = issues
         st.session_state.nf_debug = pd.DataFrame(nf_debug, columns=NF_DEBUG_COLUMNS)
         st.session_state.document_issue_at = format_datetime_display()
+        bump_processed_data_version()
 
         if processed_df.empty:
             st.warning("Nenhum dado foi processado. Verifique se o Excel possui NFs validas.")
         else:
+            with measure("process.analise_operacional"):
+                executar_analise_operacional(processed_df)
             st.success("Processamento concluido.")
     except ValueError as exc:
         st.session_state.processed_df = create_empty_processed_df()
         st.session_state.summary = create_empty_summary()
         st.session_state.issues = []
         st.session_state.nf_debug = create_empty_nf_debug_df()
+        bump_processed_data_version()
         st.error(str(exc))
     except Exception as exc:
         st.session_state.processed_df = create_empty_processed_df()
         st.session_state.summary = create_empty_summary()
         st.session_state.issues = []
         st.session_state.nf_debug = create_empty_nf_debug_df()
+        bump_processed_data_version()
         st.error(f"Erro inesperado ao processar os arquivos: {exc}")
 
 
@@ -1740,7 +1735,7 @@ def serialize_xml_record(xml_data: dict[str, object]) -> dict[str, object]:
         "Arquivo": str(xml_data.get("Arquivo", "") or "").strip(),
         "Erro": bool(xml_data.get("Erro", False)),
         "TipoXML": str(xml_data.get("TipoXML", "normal") or "normal").strip(),
-        "ROTA": str(xml_data.get("ROTA", "") or get_route_for_municipio(municipio)).strip(),
+        "ROTA": normalize_route_label(xml_data.get("ROTA", "")),
     }
 
 
@@ -1815,7 +1810,330 @@ def resolve_xml_source(xml_source: object) -> tuple[dict[str, dict[str, object]]
     return {}, []
 
 
-def salvar_xmls_processados_json(xml_files: list) -> tuple[dict[str, int], list[str]]:
+def build_xml_upload_signature(xml_files: list) -> str:
+    upload_signature_parts: list[str] = []
+    for uploaded_file in xml_files or []:
+        file_bytes = uploaded_file.getvalue()
+        upload_signature_parts.append(f"{uploaded_file.name}:{hashlib.sha256(file_bytes).hexdigest()}")
+    return hashlib.sha256("|".join(upload_signature_parts).encode("utf-8")).hexdigest()
+
+
+class StoredXmlUpload:
+    def __init__(self, name: str, data: bytes):
+        self.name = name
+        self._data = data
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+    def seek(self, _offset: int) -> None:
+        return None
+
+
+def build_xml_file_key(name: str, file_bytes: bytes) -> str:
+    return f"{name}:{hashlib.sha256(file_bytes).hexdigest()}"
+
+
+def ensure_xml_upload_batch() -> dict[str, dict[str, object]]:
+    if "xml_upload_batch" not in st.session_state:
+        st.session_state.xml_upload_batch = {}
+    return st.session_state.xml_upload_batch
+
+
+def merge_uploaded_files_into_xml_batch(uploaded_files: list | None) -> tuple[int, int, list[str]]:
+    if not uploaded_files:
+        return 0, 0, []
+
+    batch = ensure_xml_upload_batch()
+    added = 0
+    duplicates = 0
+    messages: list[str] = []
+
+    for uploaded_file in uploaded_files:
+        if len(batch) >= MAX_XML_UPLOAD_BATCH:
+            raise ValueError(f"Limite maximo de {MAX_XML_UPLOAD_BATCH} XMLs por lote.")
+
+        file_bytes = uploaded_file.getvalue()
+        file_key = build_xml_file_key(uploaded_file.name, file_bytes)
+        if file_key in batch:
+            duplicates += 1
+            messages.append(f"XML duplicado ignorado: {uploaded_file.name}")
+            continue
+
+        batch[file_key] = {
+            "name": uploaded_file.name,
+            "data": file_bytes,
+            "imported": False,
+        }
+        added += 1
+
+    return added, duplicates, messages
+
+
+def remove_xml_from_upload_batch(file_key: str) -> None:
+    ensure_xml_upload_batch().pop(file_key, None)
+
+
+def get_pending_xml_batch_uploads() -> list[StoredXmlUpload]:
+    batch = ensure_xml_upload_batch()
+    pending: list[StoredXmlUpload] = []
+    for item in batch.values():
+        if not item.get("imported"):
+            pending.append(StoredXmlUpload(str(item.get("name", "arquivo.xml")), bytes(item.get("data", b""))))
+    return pending
+
+
+def extract_rejected_xml_filenames_from_issues(
+    issues: list[str],
+    parsed_records: list[dict[str, object]],
+) -> set[str]:
+    rejected: set[str] = set()
+    nf_to_arquivo = {
+        str(record.get("NF", "")): str(record.get("Arquivo", ""))
+        for record in parsed_records
+        if record.get("NF") and record.get("Arquivo")
+    }
+    rejection_patterns = (
+        r"^Erro no XML (.+?):",
+        r"^XML sem chave/NF identificavel: (.+)$",
+        r"^XML duplicado no lote ignorado: (.+)$",
+        r"^XML duplicado ou desatualizado ignorado: (.+)$",
+    )
+
+    for issue in issues:
+        matched = False
+        for pattern in rejection_patterns:
+            match = re.match(pattern, issue)
+            if match:
+                rejected.add(match.group(1).strip())
+                matched = True
+                break
+        if matched:
+            continue
+
+        separada_match = re.match(
+            r"^NF (.+?) ignorada no upload porque ja esta separada\.$",
+            issue,
+        )
+        if separada_match:
+            arquivo = nf_to_arquivo.get(separada_match.group(1).strip())
+            if arquivo:
+                rejected.add(arquivo)
+
+    return rejected
+
+
+def finalize_xml_upload_batch_after_import(
+    imported_file_keys: list[str],
+    parsed_records: list[dict[str, object]],
+    issues: list[str],
+) -> None:
+    batch = ensure_xml_upload_batch()
+    accepted_names = {
+        str(record.get("Arquivo", ""))
+        for record in parsed_records
+        if record.get("Arquivo")
+    }
+    rejected_names = extract_rejected_xml_filenames_from_issues(issues, parsed_records)
+    valid_names = {name for name in accepted_names if name not in rejected_names}
+
+    for file_key in imported_file_keys:
+        item = batch.get(file_key)
+        if not item:
+            continue
+
+        filename = str(item.get("name", ""))
+        if filename in valid_names:
+            item["imported"] = True
+            item["accepted"] = True
+            continue
+
+        batch.pop(file_key, None)
+
+
+def get_accepted_xml_upload_batch_items() -> list[tuple[str, dict[str, object]]]:
+    batch = ensure_xml_upload_batch()
+    return [(file_key, item) for file_key, item in batch.items() if item.get("accepted")]
+
+
+def has_accepted_xml_upload_batch() -> bool:
+    return bool(get_accepted_xml_upload_batch_items())
+
+
+def merge_import_summary(existing: dict[str, int], incoming: dict[str, int]) -> dict[str, int]:
+    summary_keys = [
+        "total_arquivos",
+        "processados",
+        "erros",
+        "duplicados",
+        "ignorados",
+        "novas",
+        "atualizadas",
+        "ignoradas_separadas",
+        "duplicados_lote",
+        "duplicados_armazenamento",
+    ]
+    merged = {key: int((existing or {}).get(key, 0)) for key in summary_keys}
+    for key in summary_keys:
+        merged[key] += int((incoming or {}).get(key, 0))
+    return merged
+
+
+def import_pending_xml_batch(
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> tuple[dict[str, int], list[str], int]:
+    batch = ensure_xml_upload_batch()
+    pending_keys = [file_key for file_key, item in batch.items() if not item.get("imported")]
+    pending_uploads = get_pending_xml_batch_uploads()
+    if not pending_uploads:
+        return dict(st.session_state.get("xml_upload_summary", {})), list(st.session_state.get("xml_upload_issues", [])), 0
+
+    parsed_records, parse_summary, parse_issues = parse_xml_upload_batch(pending_uploads, progress_callback)
+    summary, issues = persist_xml_records(parsed_records, parse_summary, parse_issues)
+    finalize_xml_upload_batch_after_import(pending_keys, parsed_records, issues)
+    return summary, issues, len(pending_uploads)
+
+
+def apply_xml_batch_import_result(summary: dict[str, int], issues: list[str]) -> None:
+    merged_summary = merge_import_summary(st.session_state.get("xml_upload_summary", {}), summary)
+    merged_issues = list(st.session_state.get("xml_upload_issues", [])) + list(issues)
+    st.session_state["runtime_refresh_required"] = True
+    invalidate_balcao_lookup_cache()
+    clear_contexto_operacional()
+    st.session_state.xml_upload_message = format_xml_import_summary_message(summary)
+    st.session_state.xml_upload_summary = merged_summary
+    st.session_state.xml_upload_error = ""
+    st.session_state.xml_upload_issues = merged_issues
+
+
+def run_pending_xml_batch_import() -> None:
+    pending_count = len(get_pending_xml_batch_uploads())
+    if pending_count <= 0:
+        return
+
+    progress_bar = st.progress(0.0, text="Preparando importacao em lote...")
+    progress_caption = st.empty()
+
+    def update_import_progress(current: int, total: int) -> None:
+        if total <= 0:
+            return
+        progress_value = min(float(current) / float(total), 1.0)
+        progress_bar.progress(progress_value, text=f"Processando XMLs: {current}/{total}")
+        progress_caption.caption(f"Lendo e validando arquivos: {current} de {total}")
+
+    try:
+        with measure("import.xml_batch"):
+            summary, issues, _ = import_pending_xml_batch(update_import_progress)
+        apply_xml_batch_import_result(summary, issues)
+    except ValueError as exc:
+        st.session_state.xml_upload_message = ""
+        st.session_state.xml_upload_error = str(exc)
+    finally:
+        progress_bar.empty()
+        progress_caption.empty()
+
+
+def handle_xml_upload_selection(uploaded_files: list | None) -> None:
+    if not uploaded_files:
+        return
+
+    try:
+        added, _, duplicate_messages = merge_uploaded_files_into_xml_batch(uploaded_files)
+        for message in duplicate_messages:
+            st.warning(message)
+        if added > 0:
+            run_pending_xml_batch_import()
+    except ValueError as exc:
+        st.session_state.xml_upload_message = ""
+        st.session_state.xml_upload_error = str(exc)
+
+
+def render_xml_upload_batch_list() -> None:
+    visible_items = get_accepted_xml_upload_batch_items()
+    if not visible_items:
+        return
+
+    st.caption(f"{len(visible_items)} arquivo(s) selecionado(s)")
+    for file_key, item in visible_items:
+        name_col, remove_col = st.columns([6, 1], gap="small")
+        with name_col:
+            st.markdown(f"**{html.escape(str(item.get('name', 'arquivo.xml')))}**")
+        with remove_col:
+            if st.button("❌", key=f"xml_remove_{hashlib.sha256(file_key.encode()).hexdigest()[:16]}", help="Remover"):
+                remove_xml_from_upload_batch(file_key)
+                st.rerun()
+
+    st.markdown("---")
+
+
+def format_xml_import_summary_message(summary: dict[str, int]) -> str:
+    return (
+        "Importacao concluida: "
+        f"{summary.get('total_arquivos', 0)} arquivo(s) • "
+        f"{summary.get('processados', 0)} processados • "
+        f"{summary.get('erros', 0)} com erro • "
+        f"{summary.get('duplicados', 0)} duplicados • "
+        f"{summary.get('ignorados', 0)} ignorados"
+    )
+
+
+def parse_xml_upload_batch(
+    xml_files: list,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> tuple[list[dict[str, object]], dict[str, int], list[str]]:
+    issues: list[str] = []
+    summary = {
+        "total_arquivos": len(xml_files or []),
+        "erros": 0,
+        "duplicados_lote": 0,
+    }
+    batch_lookup: dict[str, dict[str, object]] = {}
+    total_files = len(xml_files or [])
+
+    for index, xml_file in enumerate(xml_files or []):
+        if progress_callback is not None:
+            progress_callback(index, total_files)
+
+        xml_data = parse_xml_file(xml_file)
+        if xml_data.get("Erro"):
+            summary["erros"] += 1
+            issues.append(f"Erro no XML {xml_data.get('Arquivo', 'arquivo.xml')}: {xml_data.get('Status', '')}")
+            continue
+
+        serialized = serialize_xml_record(xml_data)
+        identity = get_xml_identity(serialized)
+        if not identity:
+            summary["erros"] += 1
+            issues.append(f"XML sem chave/NF identificavel: {serialized.get('Arquivo', 'arquivo.xml')}")
+            continue
+
+        current_record = batch_lookup.get(identity)
+        if current_record is None:
+            batch_lookup[identity] = serialized
+            continue
+
+        if should_replace_xml_record(current_record, serialized):
+            batch_lookup[identity] = serialized
+            issues.append(
+                f"NF {serialized.get('NF', '--')} duplicada no lote. Foi mantido o arquivo mais recente: "
+                f"{serialized.get('Arquivo', 'arquivo.xml')}"
+            )
+            continue
+
+        summary["duplicados_lote"] += 1
+        issues.append(f"XML duplicado no lote ignorado: {serialized.get('Arquivo', 'arquivo.xml')}")
+
+    if progress_callback is not None:
+        progress_callback(total_files, total_files)
+
+    return list(batch_lookup.values()), summary, issues
+
+
+def persist_xml_records(
+    parsed_records: list[dict[str, object]],
+    parse_summary: dict[str, int],
+    parse_issues: list[str],
+) -> tuple[dict[str, int], list[str]]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     existing_records, _ = carregar_xmls_processados_json(str(XMLS_PROCESSADOS_JSON_PATH))
     existing_separacao_records, _ = carregar_separacao_json(str(SEPARACAO_JSON_PATH))
@@ -1826,8 +2144,19 @@ def salvar_xmls_processados_json(xml_files: list) -> tuple[dict[str, int], list[
         if is_separacao_group_locked(records)
     }
     storage_lookup: dict[str, dict[str, object]] = {}
-    issues: list[str] = []
-    summary = {"novas": 0, "atualizadas": 0, "ignoradas_separadas": 0, "ignoradas_duplicadas": 0}
+    issues = list(parse_issues)
+    summary = {
+        "total_arquivos": int(parse_summary.get("total_arquivos", 0)),
+        "erros": int(parse_summary.get("erros", 0)),
+        "duplicados_lote": int(parse_summary.get("duplicados_lote", 0)),
+        "novas": 0,
+        "atualizadas": 0,
+        "ignoradas_separadas": 0,
+        "duplicados_armazenamento": 0,
+        "duplicados": int(parse_summary.get("duplicados_lote", 0)),
+        "processados": 0,
+        "ignorados": 0,
+    }
 
     for existing_record in existing_records:
         normalized_record = serialize_xml_record(existing_record)
@@ -1835,18 +2164,9 @@ def salvar_xmls_processados_json(xml_files: list) -> tuple[dict[str, int], list[
         if identity:
             storage_lookup[identity] = normalized_record
 
-    for xml_file in xml_files or []:
-        xml_data = parse_xml_file(xml_file)
-        if xml_data.get("Erro"):
-            issues.append(f"Erro no XML {xml_data.get('Arquivo', 'arquivo.xml')}: {xml_data.get('Status', '')}")
-            summary["ignoradas_duplicadas"] += 1
-            continue
-
-        serialized = serialize_xml_record(xml_data)
+    for serialized in parsed_records:
         identity = get_xml_identity(serialized)
         if not identity:
-            issues.append(f"XML sem chave/NF identificavel: {serialized.get('Arquivo', 'arquivo.xml')}")
-            summary["ignoradas_duplicadas"] += 1
             continue
 
         if identity in locked_identities:
@@ -1865,53 +2185,60 @@ def salvar_xmls_processados_json(xml_files: list) -> tuple[dict[str, int], list[
             summary["atualizadas"] += 1
             issues.append(f"NF {serialized.get('NF', '--')} atualizada pelo evento/XML mais recente.")
         else:
-            summary["ignoradas_duplicadas"] += 1
+            summary["duplicados_armazenamento"] += 1
+            summary["duplicados"] += 1
             issues.append(f"XML duplicado ou desatualizado ignorado: {serialized.get('Arquivo', 'arquivo.xml')}")
 
     serialized_records = sort_xml_records(list(storage_lookup.values()))
+    SqlXmlRecordRepository().replace_all_records(serialized_records)
+    carregar_xmls_processados_records.clear()
 
-    XMLS_PROCESSADOS_JSON_PATH.write_text(
-        json.dumps(serialized_records, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    carregar_xmls_processados_json.clear()
+    summary["processados"] = summary["novas"] + summary["atualizadas"]
+    summary["ignorados"] = summary["ignoradas_separadas"]
     return summary, issues
 
 
-@st.cache_data(show_spinner=False)
-def carregar_xmls_processados_json(json_path: str) -> tuple[list[dict[str, object]], str]:
-    path = Path(json_path)
-    if not path.is_file():
-        return [], ""
+def import_xml_upload_batch(
+    xml_files: list,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> tuple[dict[str, int], list[str]]:
+    total_files = len(xml_files or [])
+    if total_files > MAX_XML_UPLOAD_BATCH:
+        raise ValueError(f"Limite maximo de {MAX_XML_UPLOAD_BATCH} XMLs por operacao.")
 
+    parsed_records, parse_summary, parse_issues = parse_xml_upload_batch(xml_files, progress_callback)
+    return persist_xml_records(parsed_records, parse_summary, parse_issues)
+
+
+def salvar_xmls_processados_records(xml_files: list) -> tuple[dict[str, int], list[str]]:
+    return import_xml_upload_batch(xml_files)
+
+
+def salvar_xmls_processados_json(xml_files: list) -> tuple[dict[str, int], list[str]]:
+    return salvar_xmls_processados_records(xml_files)
+
+
+@st.cache_data(show_spinner=False)
+def carregar_xmls_processados_records(json_path: str) -> tuple[list[dict[str, object]], str]:
+    _ = json_path
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        records = SqlXmlRecordRepository().list_all_records()
+        return [serialize_xml_record(item) for item in records], ""
+    except Exception as exc:
         return [], f"Os XMLs salvos no sistema nao puderam ser lidos ({exc}). Envie novos arquivos para atualizar a base."
 
-    if not isinstance(payload, list):
-        return [], "Os XMLs salvos no sistema estao em formato invalido. Envie novos arquivos para atualizar a base."
 
-    try:
-        records = [serialize_xml_record(item) for item in payload if isinstance(item, dict)]
-    except Exception as exc:
-        return [], f"Os XMLs salvos no sistema estao corrompidos ({exc}). Envie novos arquivos para atualizar a base."
-
-    original_records = [item for item in payload if isinstance(item, dict)]
-    if records != original_records:
-        try:
-            path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError:
-            pass
-
-    return records, ""
+def carregar_xmls_processados_json(json_path: str) -> tuple[list[dict[str, object]], str]:
+    return carregar_xmls_processados_records(json_path)
 
 
 def get_xml_storage_status() -> tuple[bool, str]:
-    if not XMLS_PROCESSADOS_JSON_PATH.is_file():
+    repository = SqlXmlRecordRepository()
+    if repository.count_records() <= 0:
         return False, ""
-
-    updated_at = datetime.fromtimestamp(XMLS_PROCESSADOS_JSON_PATH.stat().st_mtime)
+    updated_at = repository.get_last_updated_at()
+    if updated_at is None:
+        return True, ""
     return True, format_datetime_display(updated_at)
 
 
@@ -1968,14 +2295,11 @@ def sort_separacao_records(records: list[dict[str, object]]) -> list[dict[str, o
 
 
 @st.cache_data(show_spinner=False)
-def carregar_separacao_json(json_path: str) -> tuple[list[dict[str, object]], str]:
-    path = Path(json_path)
-    if not path.is_file():
-        return [], ""
-
+def carregar_separacao_records(json_path: str) -> tuple[list[dict[str, object]], str]:
+    _ = json_path
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        payload = _CONFIG_STORAGE.load_list(CONFIG_CHAVE_SEPARACAO, default=[])
+    except Exception as exc:
         return [], f"A base de separacao nao pôde ser lida ({exc})."
 
     if not isinstance(payload, list):
@@ -1984,14 +2308,19 @@ def carregar_separacao_json(json_path: str) -> tuple[list[dict[str, object]], st
     return sort_separacao_records([serialize_separacao_record(item) for item in payload if isinstance(item, dict)]), ""
 
 
-def salvar_separacao_json(records: list[dict[str, object]]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def carregar_separacao_json(json_path: str) -> tuple[list[dict[str, object]], str]:
+    return carregar_separacao_records(json_path)
+
+
+def salvar_separacao_records(records: list[dict[str, object]]) -> None:
     serialized_records = [serialize_separacao_record(record) for record in records]
-    SEPARACAO_JSON_PATH.write_text(
-        json.dumps(sort_separacao_records(serialized_records), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    carregar_separacao_json.clear()
+    _CONFIG_STORAGE.save_list(CONFIG_CHAVE_SEPARACAO, sort_separacao_records(serialized_records))
+    carregar_separacao_records.clear()
+    invalidate_latest_closed_lote_pdf_cache()
+
+
+def salvar_separacao_json(records: list[dict[str, object]]) -> None:
+    salvar_separacao_records(records)
 
 
 def get_separacao_identity(record: dict[str, object]) -> str:
@@ -2177,14 +2506,11 @@ def serialize_lote_record(record: dict[str, object]) -> dict[str, object]:
 
 
 @st.cache_data(show_spinner=False)
-def carregar_lotes_json(json_path: str) -> tuple[list[dict[str, object]], str]:
-    path = Path(json_path)
-    if not path.is_file():
-        return [], ""
-
+def carregar_lotes_records(json_path: str) -> tuple[list[dict[str, object]], str]:
+    _ = json_path
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        payload = _CONFIG_STORAGE.load_list(CONFIG_CHAVE_LOTES, default=[])
+    except Exception as exc:
         return [], f"A base de lotes nao pôde ser lida ({exc})."
 
     if not isinstance(payload, list):
@@ -2193,8 +2519,11 @@ def carregar_lotes_json(json_path: str) -> tuple[list[dict[str, object]], str]:
     return [serialize_lote_record(item) for item in payload if isinstance(item, dict)], ""
 
 
-def salvar_lotes_json(records: list[dict[str, object]]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def carregar_lotes_json(json_path: str) -> tuple[list[dict[str, object]], str]:
+    return carregar_lotes_records(json_path)
+
+
+def salvar_lotes_records(records: list[dict[str, object]]) -> None:
     normalized_records: list[dict[str, object]] = []
     for record in records:
         normalized = serialize_lote_record(record)
@@ -2211,8 +2540,12 @@ def salvar_lotes_json(records: list[dict[str, object]]) -> None:
         ),
         reverse=True,
     )
-    LOTES_JSON_PATH.write_text(json.dumps(normalized_records, ensure_ascii=False, indent=2), encoding="utf-8")
-    carregar_lotes_json.clear()
+    _CONFIG_STORAGE.save_list(CONFIG_CHAVE_LOTES, normalized_records)
+    carregar_lotes_records.clear()
+
+
+def salvar_lotes_json(records: list[dict[str, object]]) -> None:
+    salvar_lotes_records(records)
 
 
 def enrich_lote_registry_dates(records: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -3081,8 +3414,7 @@ def build_separacao_records_from_xml_records(
         if existing_group_locked:
             summary["ignoradas_separadas"] += 1
 
-        route = str(normalized_xml.get("ROTA", "") or get_route_for_municipio(normalized_xml.get("Municipio", ""))).strip()
-        route = route or UNDEFINED_ROUTE_LABEL
+        route = normalize_route_label(normalized_xml.get("ROTA", ""))
         items = normalized_xml.get("Items", []) or [{"cProd": "", "Descricao": "Sem produto detalhado", "Qtd": 0.0, "Unidade": ""}]
 
         for item in items:
@@ -3150,49 +3482,33 @@ def sincronizar_base_separacao(
 
 
 def get_separacao_storage_status() -> tuple[bool, str]:
-    if not SEPARACAO_JSON_PATH.is_file():
+    records, _ = carregar_separacao_json("")
+    if not records:
         return False, ""
-
-    updated_at = datetime.fromtimestamp(SEPARACAO_JSON_PATH.stat().st_mtime)
-    return True, format_datetime_display(updated_at)
+    return True, format_datetime_display(datetime.now())
 
 
 @st.cache_data(show_spinner=False)
+def carregar_separacao_excluidos_records(json_path: str) -> set[str]:
+    _ = json_path
+    return _CONFIG_STORAGE.load_set(CONFIG_CHAVE_SEPARACAO_EXCLUIDOS)
+
+
 def carregar_separacao_excluidos_json(json_path: str) -> set[str]:
-    path = Path(json_path)
-    if not path.is_file():
-        return set()
+    return carregar_separacao_excluidos_records(json_path)
 
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return set()
 
-    if not isinstance(payload, list):
-        return set()
-
-    return {
-        str(item).strip()
-        for item in payload
-        if str(item or "").strip()
-    }
+def salvar_separacao_excluidos_records(identities: set[str]) -> None:
+    normalized_identities = sorted({str(identity or "").strip() for identity in identities if str(identity or "").strip()})
+    if not normalized_identities:
+        _CONFIG_STORAGE.save_list(CONFIG_CHAVE_SEPARACAO_EXCLUIDOS, [])
+    else:
+        _CONFIG_STORAGE.save_list(CONFIG_CHAVE_SEPARACAO_EXCLUIDOS, normalized_identities)
+    carregar_separacao_excluidos_records.clear()
 
 
 def salvar_separacao_excluidos_json(identities: set[str]) -> None:
-    normalized_identities = sorted({str(identity or "").strip() for identity in identities if str(identity or "").strip()})
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    if not normalized_identities:
-        if SEPARACAO_EXCLUIDOS_JSON_PATH.is_file():
-            SEPARACAO_EXCLUIDOS_JSON_PATH.unlink()
-        carregar_separacao_excluidos_json.clear()
-        return
-
-    SEPARACAO_EXCLUIDOS_JSON_PATH.write_text(
-        json.dumps(normalized_identities, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    carregar_separacao_excluidos_json.clear()
+    salvar_separacao_excluidos_records(identities)
 
 
 def parse_flexible_datetime(value: object) -> datetime | None:
@@ -3329,8 +3645,8 @@ def executar_limpeza_dados_sistema(data_inicial: object, data_final: object, tip
 
         salvar_separacao_json([])
         salvar_lotes_json([])
-        XMLS_PROCESSADOS_JSON_PATH.write_text("[]", encoding="utf-8")
-        carregar_xmls_processados_json.clear()
+        SqlXmlRecordRepository().replace_all_records([])
+        carregar_xmls_processados_records.clear()
         salvar_separacao_excluidos_json(set())
 
         return {
@@ -3472,11 +3788,8 @@ def executar_limpeza_dados_sistema(data_inicial: object, data_final: object, tip
     if lotes_changed:
         salvar_lotes_json(current_lotes_records)
     if xml_changed:
-        XMLS_PROCESSADOS_JSON_PATH.write_text(
-            json.dumps(current_xml_records, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        carregar_xmls_processados_json.clear()
+        SqlXmlRecordRepository().replace_all_records(current_xml_records)
+        carregar_xmls_processados_records.clear()
     salvar_separacao_excluidos_json(updated_excluded_identities)
 
     return {
@@ -3506,6 +3819,8 @@ def invalidate_runtime_data() -> None:
     st.session_state["runtime_xml_records"] = []
     st.session_state["runtime_classificacao_records"] = []
     st.session_state["runtime_refresh_required"] = True
+    invalidate_balcao_lookup_cache()
+    invalidate_latest_closed_lote_pdf_cache()
 
 
 def get_path_cache_token(path: Path) -> int:
@@ -3535,9 +3850,8 @@ def build_search_blob_series(dataframe: pd.DataFrame, columns: list[str]) -> pd.
 
 
 @st.cache_data(show_spinner=False)
-def prepare_processed_search_dataframe(dataframe: pd.DataFrame, route_version: int) -> pd.DataFrame:
-    _ = route_version
-    prepared_df = apply_routes_to_dataframe(dataframe)
+def prepare_processed_search_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
+    prepared_df = ensure_route_column(dataframe)
     prepared_df["_search_blob"] = build_search_blob_series(
         prepared_df,
         ["NF", "cProd", "Descricao", "Destinatario", "ROTA", "Status"],
@@ -3781,7 +4095,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_source: object) -> tuple
             processed_df = create_empty_processed_df()
         else:
             processed_df = processed_df.sort_values(by=["Seq_sort", "NF"], ascending=[False, True], na_position="last")
-        processed_df = apply_routes_to_dataframe(processed_df)
+        processed_df = apply_routes_from_xml_index(processed_df, xml_index)
 
         display_df = processed_df[TABLE_COLUMNS].copy()
         error_mask = ~display_df["Status"].astype(str).str.contains("autorizado", case=False, na=False)
@@ -3927,7 +4241,7 @@ def integrate_excel_with_xml(base_df: pd.DataFrame, xml_source: object) -> tuple
         processed_df = create_empty_processed_df()
     else:
         processed_df = processed_df.sort_values(by=["Seq_sort", "NF"], ascending=[False, True], na_position="last")
-    processed_df = apply_routes_to_dataframe(processed_df)
+    processed_df = apply_routes_from_xml_index(processed_df, xml_index)
 
     display_df = processed_df[TABLE_COLUMNS].copy()
     error_mask = ~display_df["Status"].astype(str).str.contains("autorizado", case=False, na=False)
@@ -3991,21 +4305,144 @@ def create_empty_nf_debug_df() -> pd.DataFrame:
     return pd.DataFrame(columns=NF_DEBUG_COLUMNS)
 
 
-def build_table_column_config(dataframe: pd.DataFrame) -> dict[str, object]:
+def build_balcao_lookup_dataframe(xml_records: list[dict[str, object]]) -> pd.DataFrame:
+    xml_index, _ = build_xml_index_from_records(xml_records)
+    if not xml_index:
+        return create_empty_processed_df()
+
+    rows: list[dict[str, object]] = []
+    for index, xml_data in enumerate(xml_index.values(), start=1):
+        if not xml_data.get("Items"):
+            rows.append(
+                {
+                    "Seq": index,
+                    "Seq_sort": index,
+                    "ChaveNFe": xml_data.get("ChaveNFe", ""),
+                    "NF": xml_data.get("NF", ""),
+                    "Data": xml_data.get("Data", ""),
+                    "cProd": "",
+                    "Descricao": "",
+                    "Qtd": 0.0,
+                    "Unidade": "",
+                    "Volume": xml_data.get("VolumeTotal", 0.0),
+                    "Peso": 0.0,
+                    "PesoTotalNF": xml_data.get("PesoTotal", 0.0),
+                    "ValorNF": xml_data.get("ValorNF", 0.0),
+                    "Destinatario": xml_data.get("Destinatario", ""),
+                    "Municipio": xml_data.get("Municipio", ""),
+                    "UF": xml_data.get("UF", ""),
+                    "Status": str(xml_data.get("Status", "")),
+                }
+            )
+            continue
+
+        for item in xml_data.get("Items", []):
+            rows.append(
+                {
+                    "Seq": index,
+                    "Seq_sort": index,
+                    "ChaveNFe": xml_data.get("ChaveNFe", ""),
+                    "NF": xml_data.get("NF", ""),
+                    "Data": xml_data.get("Data", ""),
+                    "cProd": item.get("cProd", ""),
+                    "Descricao": item.get("Descricao", ""),
+                    "Qtd": item.get("Qtd", 0.0),
+                    "Unidade": item.get("Unidade", ""),
+                    "Volume": xml_data.get("VolumeTotal", 0.0),
+                    "Peso": item.get("Peso", 0.0),
+                    "PesoTotalNF": xml_data.get("PesoTotal", 0.0),
+                    "ValorNF": xml_data.get("ValorNF", 0.0),
+                    "Destinatario": xml_data.get("Destinatario", ""),
+                    "Municipio": xml_data.get("Municipio", ""),
+                    "UF": xml_data.get("UF", ""),
+                    "Status": str(xml_data.get("Status", "")),
+                }
+            )
+
+    processed_df = pd.DataFrame(rows)
+    if processed_df.empty:
+        return create_empty_processed_df()
+
+    processed_df = processed_df.sort_values(by=["Seq_sort", "NF"], ascending=[False, True], na_position="last")
+    return apply_routes_from_xml_index(processed_df, xml_index)
+
+
+def build_balcao_summary() -> dict[str, object]:
     return {
-        "Seq": st.column_config.NumberColumn("Seq", format="%d", width="small"),
-        "NF": st.column_config.TextColumn("NF", width="small"),
-        "cProd": st.column_config.TextColumn("cProd", width="small"),
-        "Descricao": st.column_config.TextColumn("Descricao", width="medium"),
-        "Qtd": st.column_config.NumberColumn("Qtd", format="%.4f", width="small"),
-        "Unidade": st.column_config.TextColumn("UN", width="small"),
-        "Peso": st.column_config.NumberColumn("Peso", format="%.3f kg", width="small"),
-        "Destinatario": st.column_config.TextColumn("Destinatario", width="medium"),
-        "ROTA": st.column_config.TextColumn("ROTA", width="medium"),
-        "Status": st.column_config.TextColumn("Status", width="medium"),
+        "filial": "BRIDA",
+        "data_saida": datetime.now().strftime("%d/%m/%Y"),
+        "nf_count": 0,
+        "item_count": 0,
+        "peso_total": 0.0,
     }
 
 
+def get_balcao_lookup_dataframe(xml_records: list[dict[str, object]]) -> pd.DataFrame:
+    runtime_signature = st.session_state.get("runtime_data_signature")
+    cached_signature = st.session_state.get("_balcao_lookup_signature")
+    cached_df = st.session_state.get("balcao_lookup_df")
+    if cached_signature == runtime_signature and isinstance(cached_df, pd.DataFrame):
+        return cached_df
+
+    with measure("dataframe.balcao_lookup"):
+        lookup_df = build_balcao_lookup_dataframe(xml_records)
+    st.session_state["balcao_lookup_df"] = lookup_df
+    st.session_state["_balcao_lookup_signature"] = runtime_signature
+    return lookup_df
+
+
+def get_prepared_processed_dataframe() -> pd.DataFrame:
+    version = st.session_state.get("_processed_data_version", 0)
+    if (
+        st.session_state.get("_prepared_df_version") == version
+        and isinstance(st.session_state.get("_prepared_processed_df"), pd.DataFrame)
+    ):
+        return st.session_state["_prepared_processed_df"]
+
+    with measure("dataframe.prepare_processed"):
+        prepared_df = prepare_processed_search_dataframe(st.session_state.processed_df)
+    st.session_state["_prepared_processed_df"] = prepared_df
+    st.session_state["_prepared_df_version"] = version
+    return prepared_df
+
+
+def get_display_table_dataframe(processed_df: pd.DataFrame) -> pd.DataFrame:
+    version = st.session_state.get("_processed_data_version", 0)
+    if (
+        st.session_state.get("_display_table_version") == version
+        and isinstance(st.session_state.get("_display_table_df"), pd.DataFrame)
+    ):
+        return st.session_state["_display_table_df"]
+
+    with measure("dataframe.build_display_table"):
+        display_df = build_display_table(processed_df[TABLE_COLUMNS].copy())
+    st.session_state["_display_table_df"] = display_df
+    st.session_state["_display_table_version"] = version
+    return display_df
+
+
+def get_latest_closed_lote_pdf_bytes(
+    lote_summary: dict[str, object],
+    lote_records: list[dict[str, object]],
+    lote_id: str,
+) -> bytes:
+    if not lote_id or not lote_records:
+        return b""
+
+    signature = f"{lote_id}:{len(lote_records)}"
+    cached_signature = st.session_state.get("_latest_closed_lote_pdf_sig")
+    cached_pdf = st.session_state.get("_latest_closed_lote_pdf")
+    if cached_signature == signature and isinstance(cached_pdf, (bytes, bytearray)) and cached_pdf:
+        return bytes(cached_pdf)
+
+    with measure("pdf.generate_lote"):
+        pdf_bytes = generate_lote_pdf(lote_summary, lote_records)
+    st.session_state["_latest_closed_lote_pdf"] = pdf_bytes
+    st.session_state["_latest_closed_lote_pdf_sig"] = signature
+    return pdf_bytes
+
+
+from utils.streamlit_tables import build_table_column_config
 def wrap_table_text(value: object, width: int) -> str:
     text = str(value or "").strip()
     if not text:
@@ -4033,25 +4470,8 @@ def build_display_table(dataframe: pd.DataFrame) -> pd.DataFrame:
     return display_df
 
 
-def handle_login(username: str, password: str) -> bool:
-    return username == LOGIN_USERNAME and password == LOGIN_PASSWORD
-
-
 def initialize_login_state() -> None:
-    auth_query_value = st.query_params.get(AUTH_QUERY_PARAM, "")
-    if "logado" not in st.session_state:
-        st.session_state["logado"] = auth_query_value == AUTH_QUERY_VALUE
-        return
-
-    if not st.session_state["logado"] and auth_query_value == AUTH_QUERY_VALUE:
-        st.session_state["logado"] = True
-
-
-def persist_login_state(is_logged_in: bool) -> None:
-    if is_logged_in:
-        st.query_params[AUTH_QUERY_PARAM] = AUTH_QUERY_VALUE
-    else:
-        st.query_params.clear()
+    return
 
 
 def normalize_screen_name(value: object) -> str:
@@ -4061,9 +4481,10 @@ def normalize_screen_name(value: object) -> str:
         SCREEN_LOGIN: SCREEN_LOGIN,
         SCREEN_MENU: SCREEN_MENU,
         SCREEN_MINUTA: SCREEN_MINUTA,
-        SCREEN_ENTREGA: SCREEN_ENTREGA,
         SCREEN_SEPARACAO: SCREEN_SEPARACAO,
         SCREEN_LOTES: SCREEN_LOTES,
+        SCREEN_USUARIOS: SCREEN_USUARIOS,
+        SCREEN_CONSULTA_CARREGAMENTOS: SCREEN_CONSULTA_CARREGAMENTOS,
     }
     return screen_aliases.get(screen, SCREEN_MENU)
 
@@ -4084,7 +4505,7 @@ def initialize_navigation_state() -> None:
     legacy_screen = st.session_state.get("tela_atual", SCREEN_MINUTA)
     current_screen = normalize_screen_name(st.session_state.get("tela", legacy_screen))
 
-    if not st.session_state.get("logado", False):
+    if not is_logged_in():
         st.session_state["tela"] = SCREEN_LOGIN
     else:
         st.session_state["tela"] = current_screen if current_screen != SCREEN_LOGIN else SCREEN_MENU
@@ -4226,205 +4647,42 @@ def render_section_heading(label: str, icon_key: str) -> None:
     )
 
 
+@contextmanager
+def ui_section_box(extra_classes: str = ""):
+    """Secao com borda nativa do Streamlit — evita divs HTML abertos/fechados em reruns."""
+    _ = extra_classes
+    with st.container(border=True):
+        yield
+
+
+_ui_section_stack: list = []
+
+
 def render_box_open(extra_classes: str = "") -> None:
-    classes = f"ui-section-box {extra_classes}".strip()
-    st.markdown(f'<div class="{classes}">', unsafe_allow_html=True)
+    """Abre secao com borda nativa (compatibilidade com blocos open/close legados)."""
+    context = ui_section_box(extra_classes)
+    _ui_section_stack.append(context)
+    context.__enter__()
 
 
 def render_box_close() -> None:
-    st.markdown("</div>", unsafe_allow_html=True)
+    """Fecha secao aberta por render_box_open."""
+    if _ui_section_stack:
+        context = _ui_section_stack.pop()
+        context.__exit__(None, None, None)
 
 
 def render_login_screen() -> None:
-    st.markdown(
-        """
-    <style>
-    html, body {
-        margin: 0;
-    }
-    .stApp {
-        background: #F5F7FA;
-    }
-    .block-container {
-        padding-top: 1.25rem !important;
-        padding-bottom: 1.25rem !important;
-        max-width: 1180px;
-    }
-    div[data-testid="stVerticalBlock"] {
-        width: 100%;
-    }
-    div[data-testid="stVerticalBlock"] > div:empty {
-        display: none;
-    }
-    .login-stage {
-        width: 100%;
-        max-width: 1040px;
-        margin: 8vh auto 0;
-        padding: 0 1.5rem;
-        box-sizing: border-box;
-    }
-    .login-logo-wrap {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        text-align: center;
-        padding: 1rem 0;
-    }
-    .login-shell {
-        max-width: 400px;
-        margin: 0 auto;
-        display: flex;
-        flex-direction: column;
-        text-align: left;
-    }
-    .login-intro {
-        max-width: 400px;
-        margin: 0 0 20px;
-        text-align: left;
-    }
-    .login-intro h2 {
-        margin: 0 0 10px;
-        color: #1F3A5F;
-        font-size: 1.65rem;
-        font-weight: 700;
-    }
-    .login-intro p {
-        margin: 0;
-        color: #607085;
-        line-height: 1.5;
-        font-size: 0.95rem;
-    }
-    div[data-testid="stForm"] {
-        max-width: 420px;
-        margin: 0;
-        padding: 24px 24px 20px;
-        border-radius: 10px;
-        background: #FFFFFF;
-        border: 1px solid rgba(31, 58, 95, 0.10);
-        box-shadow: 0 6px 18px rgba(31, 58, 95, 0.04);
-    }
-    div[data-testid="stTextInputRootElement"] > div {
-        border-radius: 8px;
-    }
-    div[data-testid="stTextInputRootElement"] input {
-        border-radius: 8px;
-    }
-    div[data-testid="stCheckbox"] {
-        max-width: 400px;
-        margin: 0 0 12px;
-        color: #607085;
-        text-align: left;
-    }
-    .login-feedback-success {
-        max-width: 420px;
-        margin: 0 0 14px;
-        margin-bottom: 14px;
-        padding: 10px 12px;
-        border-radius: 8px;
-        background: rgba(46, 111, 149, 0.10);
-        color: #1F3A5F;
-        border: 1px solid rgba(46, 111, 149, 0.22);
-        font-size: 0.92rem;
-    }
-    .login-feedback-error {
-        max-width: 420px;
-        margin: 0 0 14px;
-        margin-bottom: 14px;
-        padding: 10px 12px;
-        border-radius: 8px;
-        background: rgba(243, 112, 33, 0.10);
-        color: #9A4310;
-        border: 1px solid rgba(243, 112, 33, 0.26);
-        font-size: 0.92rem;
-    }
-    div[data-testid="stFormSubmitButton"] button {
-        background: #1F3A5F;
-        color: #FFFFFF;
-        border: 0;
-        border-radius: 8px;
-        min-height: 42px;
-        font-weight: 700;
-        box-shadow: none;
-    }
-    div[data-testid="stFormSubmitButton"] button:hover {
-        background: #25486E;
-        color: #FFFFFF;
-    }
-    @media (max-width: 960px) {
-        .login-stage {
-            margin-top: 5vh;
-            padding-left: 1rem;
-            padding-right: 1rem;
-        }
-        .login-logo-wrap {
-            margin-bottom: 1rem;
-        }
-    }
-    </style>
-    """,
-        unsafe_allow_html=True,
+    render_login_page(
+        logo_path=get_logo_path(),
+        on_success_screen=SCREEN_MENU,
+        navigate_callback=lambda screen: st.session_state.update({"tela": screen}),
     )
-
-    st.markdown('<div class="login-stage">', unsafe_allow_html=True)
-    logo_col, login_col = st.columns([1, 1], gap="large", vertical_alignment="center")
-
-    with logo_col:
-        st.markdown('<div class="login-logo-wrap">', unsafe_allow_html=True)
-        logo_path = get_logo_path()
-        if logo_path is not None:
-            st.image(str(logo_path), width=320)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with login_col:
-        st.markdown('<div class="login-shell">', unsafe_allow_html=True)
-        st.markdown(
-            """
-        <div class="login-intro">
-            <h2>Acessar sistema</h2>
-            <p>Entre com suas credenciais.</p>
-        </div>
-        """,
-            unsafe_allow_html=True,
-        )
-
-        show_password = st.checkbox("Mostrar senha")
-
-        login_error = st.session_state.get("login_error", "")
-        if login_error:
-            st.markdown(f'<div class="login-feedback-error">{login_error}</div>', unsafe_allow_html=True)
-
-        with st.form("login_form"):
-            username = st.text_input("Usuario", placeholder="Digite seu usuario")
-            password = st.text_input(
-                "Senha",
-                type="default" if show_password else "password",
-                placeholder="Digite sua senha",
-            )
-            submitted = st.form_submit_button("Entrar", use_container_width=True)
-
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        if submitted:
-            if handle_login(username, password):
-                st.session_state["logado"] = True
-                persist_login_state(True)
-                st.session_state["login_error"] = ""
-                st.session_state["login_success"] = "Acesso validado com sucesso."
-                st.session_state["tela"] = SCREEN_MENU
-                st.rerun()
-            else:
-                st.session_state["login_error"] = "Usuario ou senha incorretos."
-                st.session_state["login_success"] = ""
-
-    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def logout() -> None:
-    st.session_state["logado"] = False
+    clear_session_on_logout()
     st.session_state["tela"] = SCREEN_LOGIN
-    persist_login_state(False)
-    st.session_state["login_error"] = ""
-    st.session_state["login_success"] = ""
     st.rerun()
 
 
@@ -4433,211 +4691,728 @@ def toggle_menu() -> None:
 
 
 def apply_sidebar_visibility(menu_aberto: bool) -> None:
-    if menu_aberto:
-        st.markdown(
-            """
-        <style>
-        [data-testid="stSidebar"] {
-            display: block;
-        }
-        [data-testid="stSidebarCollapsedControl"] {
-            display: none;
-        }
-        </style>
-        """,
-            unsafe_allow_html=True,
-        )
-        return
-
-    st.markdown(
-        """
-    <style>
-    [data-testid="stSidebar"] {
-        display: none;
-    }
-    [data-testid="stSidebarCollapsedControl"] {
-        display: none;
-    }
-    [data-testid="stMainBlockContainer"] {
-        max-width: none;
-        width: 100%;
-        padding-left: 2rem;
-        padding-right: 2rem;
-    }
-    </style>
-    """,
-        unsafe_allow_html=True,
-    )
+    """Sem CSS no sidebar — expandir/recolher fica a cargo do Streamlit."""
+    _ = menu_aberto
 
 
-def render_sidebar() -> tuple[list, object, bool]:
-    with st.sidebar:
-        render_box_open("is-sidebar is-soft")
+def _render_minuta_upload_content(xml_records: list) -> tuple[list, object, bool]:
+    """Conteudo da coluna esquerda: XML, Excel, processar e estatisticas."""
+    with ui_section_box("is-sidebar is-soft"):
         st.markdown(
             f'''
-        <div class="sidebar-heading with-icon">{render_label_icon(ICON_MAP["dados_gerais"])}<span>Arquivos</span></div>
-        ''',
+    <div class="sidebar-heading with-icon">{render_label_icon(ICON_MAP["dados_gerais"])}<span>Arquivos</span></div>
+    ''',
             unsafe_allow_html=True,
         )
-        render_box_close()
 
-        render_box_open("is-sidebar")
+    with ui_section_box("is-sidebar"):
         st.markdown(
             f'''
-        <div class="sidebar-field-label with-icon">{render_label_icon(ICON_MAP["excel"])}<span>Atualizar Praças</span></div>
-        ''',
+    <div class="sidebar-field-label with-icon">{render_label_icon(ICON_MAP["xml"])}<span>Upload XML</span></div>
+    ''',
             unsafe_allow_html=True,
         )
 
-        pracas_file = st.file_uploader(
-            "Atualizar Praças",
-            type=["xlsx"],
-            accept_multiple_files=False,
-            key="pracas_upload_widget",
-        )
-
-        if pracas_file is None:
-            st.session_state.pracas_upload_signature = ""
+        if not has_accepted_xml_upload_batch():
+            xml_files = st.file_uploader(
+                "XMLs",
+                type=["xml"],
+                accept_multiple_files=True,
+                key="xml_upload_widget",
+            )
+            if xml_files:
+                handle_xml_upload_selection(xml_files)
         else:
-            file_bytes = pracas_file.getvalue()
-            current_signature = hashlib.sha256(file_bytes).hexdigest()
-            if current_signature != st.session_state.pracas_upload_signature:
-                try:
-                    st.session_state.pracas_upload_message = update_pracas_json(pracas_file)
-                    st.session_state.pracas_upload_error = ""
-                    st.session_state.pracas_upload_signature = current_signature
-                except ValueError as exc:
-                    st.session_state.pracas_upload_message = ""
-                    st.session_state.pracas_upload_error = str(exc)
-                    st.session_state.pracas_upload_signature = ""
+            render_xml_upload_batch_list()
 
-        if st.session_state.pracas_upload_message:
-            st.success(st.session_state.pracas_upload_message)
-        if st.session_state.pracas_upload_error:
-            st.error(st.session_state.pracas_upload_error)
+            if st.button("Adicionar XMLs", use_container_width=True, key="xml_add_files_button", type="secondary"):
+                st.session_state["xml_add_uploader_open"] = True
 
-        if PRACAS_JSON_PATH.is_file():
-            route_updated_at = format_datetime_display(datetime.fromtimestamp(PRACAS_JSON_PATH.stat().st_mtime))
-            st.caption(f"Base de rotas carregada • Ultima atualizacao: {route_updated_at}")
-        render_box_close()
-
-        render_box_open("is-sidebar")
-        st.markdown(
-            f'''
-        <div class="sidebar-field-label with-icon">{render_label_icon(ICON_MAP["setor"])}<span>Classificação de Produtos</span></div>
-        ''',
-            unsafe_allow_html=True,
-        )
-
-        classificacao_file = st.file_uploader(
-            "Atualizar classificação",
-            type=["xlsx", "xls"],
-            accept_multiple_files=False,
-            key="classificacao_upload_widget",
-        )
-
-        if classificacao_file is None:
-            st.session_state.classificacao_upload_signature = ""
-        else:
-            file_bytes = classificacao_file.getvalue()
-            current_signature = hashlib.sha256(file_bytes).hexdigest()
-            if current_signature != st.session_state.classificacao_upload_signature:
-                try:
-                    st.session_state.classificacao_upload_message = update_classificacao_produtos_json(classificacao_file)
-                    st.session_state.classificacao_upload_error = ""
-                    st.session_state.classificacao_upload_signature = current_signature
-                    st.session_state["runtime_refresh_required"] = True
-                except ValueError as exc:
-                    st.session_state.classificacao_upload_message = ""
-                    st.session_state.classificacao_upload_error = str(exc)
-                    st.session_state.classificacao_upload_signature = ""
-
-        if st.session_state.classificacao_upload_message:
-            st.success(st.session_state.classificacao_upload_message)
-        if st.session_state.classificacao_upload_error:
-            st.error(st.session_state.classificacao_upload_error)
-
-        has_classificacao_storage, classificacao_updated_at = get_classificacao_storage_status()
-        if has_classificacao_storage:
-            st.caption(f"Base de setores carregada • Ultima atualizacao: {classificacao_updated_at}")
-        else:
-            st.caption(classificacao_updated_at)
-        render_box_close()
-
-        render_box_open("is-sidebar")
-        st.markdown(
-            f'''
-        <div class="sidebar-field-label with-icon">{render_label_icon(ICON_MAP["xml"])}<span>Upload XML</span></div>
-        ''',
-            unsafe_allow_html=True,
-        )
-
-        xml_files = st.file_uploader(
-            "Selecionar XMLs",
-            type=["xml"],
-            accept_multiple_files=True,
-            key="xml_upload_widget",
-        )
-
-        xml_records, xml_storage_error = carregar_xmls_processados_json(str(XMLS_PROCESSADOS_JSON_PATH))
-
-        if xml_files:
-            upload_signature_parts: list[str] = []
-            for uploaded_file in xml_files:
-                file_bytes = uploaded_file.getvalue()
-                upload_signature_parts.append(f"{uploaded_file.name}:{hashlib.sha256(file_bytes).hexdigest()}")
-
-            current_signature = hashlib.sha256("|".join(upload_signature_parts).encode("utf-8")).hexdigest()
-            if current_signature != st.session_state.xml_upload_signature or not XMLS_PROCESSADOS_JSON_PATH.is_file():
-                import_summary, issues = salvar_xmls_processados_json(xml_files)
-                xml_records, xml_storage_error = carregar_xmls_processados_json(str(XMLS_PROCESSADOS_JSON_PATH))
-                st.session_state.xml_upload_signature = current_signature
-                st.session_state["runtime_refresh_required"] = True
-                st.session_state.xml_upload_message = (
-                    "Base atualizada: "
-                    f"{import_summary.get('novas', 0)} novas NFs adicionadas • "
-                    f"{import_summary.get('atualizadas', 0)} NFs atualizadas • "
-                    f"{import_summary.get('ignoradas_separadas', 0)} NFs ignoradas (já separadas)"
+            if st.session_state.get("xml_add_uploader_open", False):
+                added_files = st.file_uploader(
+                    "Adicionar XMLs",
+                    type=["xml"],
+                    accept_multiple_files=True,
+                    key="xml_upload_add_widget",
                 )
-                st.session_state.xml_upload_error = ""
-                st.session_state.xml_upload_issues = issues
+                if added_files:
+                    handle_xml_upload_selection(added_files)
 
         has_xml_storage, xml_updated_at = get_xml_storage_status()
         if st.session_state.xml_upload_message:
             st.success(st.session_state.xml_upload_message)
-        if xml_storage_error:
-            st.warning(xml_storage_error)
-        elif has_xml_storage:
+            import_summary = st.session_state.get("xml_upload_summary", {})
+            if import_summary:
+                st.caption(
+                    "Novas: "
+                    f"{import_summary.get('novas', 0)} • "
+                    "Atualizadas: "
+                    f"{import_summary.get('atualizadas', 0)} • "
+                    "Erros: "
+                    f"{import_summary.get('erros', 0)} • "
+                    "Duplicados: "
+                    f"{import_summary.get('duplicados', 0)} • "
+                    "Ignorados: "
+                    f"{import_summary.get('ignorados', 0)}"
+                )
+        if st.session_state.get("xml_upload_error"):
+            st.error(st.session_state.xml_upload_error)
+
+        has_xml_storage, xml_updated_at = get_xml_storage_status()
+        if has_xml_storage:
             st.caption(f"Dados carregados do sistema • Ultima atualizacao: {xml_updated_at}")
 
         if st.session_state.get("xml_upload_issues"):
             with st.expander("Detalhes dos XMLs", expanded=False):
                 for issue in st.session_state.xml_upload_issues:
                     st.warning(issue)
-        render_box_close()
 
-        if normalize_screen_name(st.session_state.get("tela", SCREEN_MENU)) not in {SCREEN_MINUTA, SCREEN_ENTREGA}:
-            return xml_records, None, False
+    current_screen = normalize_screen_name(st.session_state.get("tela", SCREEN_MENU))
+    if current_screen != SCREEN_MINUTA:
+        return xml_records, None, False
 
-        render_box_open("is-sidebar")
+    with ui_section_box("is-sidebar"):
         st.markdown(
             f'''
-        <div class="sidebar-field-label with-icon">{render_label_icon(ICON_MAP["excel"])}<span>Upload Excel</span></div>
-        ''',
+    <div class="sidebar-field-label with-icon">{render_label_icon(ICON_MAP["excel"])}<span>Upload Excel</span></div>
+    ''',
             unsafe_allow_html=True,
         )
 
         excel_file = st.file_uploader(
-            "Selecionar Excel",
+            "Excel",
             type=["xlsx", "xls"],
         )
 
-        current_screen = normalize_screen_name(st.session_state.get("tela", SCREEN_MENU))
-        process_label = "Gerar Minuta" if current_screen == SCREEN_ENTREGA else "Processar"
-        process_clicked = st.button(process_label, use_container_width=True)
-        render_box_close()
+        process_clicked = st.button("Processar", use_container_width=True)
+        if process_clicked and get_pending_xml_batch_uploads():
+            run_pending_xml_batch_import()
+            xml_records, _ = carregar_xmls_processados_json(str(XMLS_PROCESSADOS_JSON_PATH))
 
     return xml_records, excel_file, process_clicked
+
+
+def render_sidebar() -> tuple[list, object, bool]:
+    with measure("sql.carregar_xmls_runtime"):
+        xml_records, _ = load_runtime_reference_data()
+    with st.sidebar:
+        xml_storage_error = str(st.session_state.get("runtime_xml_storage_error", "") or "")
+        if xml_storage_error:
+            st.warning(xml_storage_error)
+        excel_file = None
+        process_clicked = False
+        xml_records, excel_file, process_clicked = _render_minuta_upload_content(xml_records)
+
+    current_screen = normalize_screen_name(st.session_state.get("tela", SCREEN_MENU))
+    if current_screen != SCREEN_MINUTA:
+        return xml_records, None, False
+    return xml_records, excel_file, process_clicked
+
+
+def build_processing_pdf_bytes(
+    processed_df: pd.DataFrame,
+    summary: dict[str, object],
+    module_config: MinutaModuleConfig,
+    *,
+    gerar_minuta: bool,
+    gerar_romaneio: bool,
+) -> tuple[bytes | None, bytes | None]:
+    carregamento_pdf_bytes = b""
+    entrega_pdf_bytes = b""
+    if gerar_minuta:
+        minuta_records = build_minuta_records(processed_df)
+        if minuta_records:
+            with measure("pdf.generate_minuta_carregamento"):
+                carregamento_pdf_bytes = generate_minuta_pdf(
+                    dados_minuta=minuta_records,
+                    numero_carga=str(summary.get("numero_carga", "--") or "--"),
+                    data_emissao=str(st.session_state.document_issue_at or "--"),
+                    veiculo=str(summary.get("placa", "--") or "--"),
+                    motorista=str(summary.get("motorista", "--") or "--"),
+                    pdf_title=module_config.pdf_title,
+                    subject_label=module_config.subject_label,
+                )
+    if gerar_romaneio:
+        entrega_records, _, entrega_totals = build_minuta_entrega_records(processed_df)
+        transportadora = str(summary.get("transportadora", "BRIDA LUBRIFICANTES LTDA") or "BRIDA LUBRIFICANTES LTDA")
+        if entrega_records:
+            with measure("pdf.generate_minuta_entrega"):
+                entrega_pdf_bytes = generate_minuta_entrega_pdf(
+                    records=entrega_records,
+                    totals=entrega_totals,
+                    numero_documento=str(summary.get("numero_carga", "--") or "--"),
+                    data_emissao=str(st.session_state.document_issue_at or "--"),
+                    transportadora=transportadora,
+                    veiculo=str(summary.get("placa", "--") or "--"),
+                    motorista=str(summary.get("motorista", "--") or "--"),
+                    placa=str(summary.get("placa", "--") or "--"),
+                )
+    return (
+        carregamento_pdf_bytes or None,
+        entrega_pdf_bytes or None,
+    )
+
+
+def build_pdf_download_package(
+    *,
+    carregamento_pdf_bytes: bytes | None,
+    entrega_pdf_bytes: bytes | None,
+    carregamento_selected: bool,
+    entrega_selected: bool,
+    numero_carga: str,
+) -> tuple[bytes, str, str, str]:
+    if not carregamento_selected and not entrega_selected:
+        return b"", "", "application/pdf", "Selecione ao menos um tipo de minuta para gerar o PDF"
+    if carregamento_selected and not entrega_selected:
+        if not carregamento_pdf_bytes:
+            return b"", "", "application/pdf", "Nao ha dados disponiveis para gerar a minuta de carregamento."
+        return (
+            carregamento_pdf_bytes,
+            f"minuta_carregamento_{sanitize_filename_part(numero_carga, 'brida')}.pdf",
+            "application/pdf",
+            "",
+        )
+    if entrega_selected and not carregamento_selected:
+        if not entrega_pdf_bytes:
+            return b"", "", "application/pdf", "Nao ha dados validos disponiveis para gerar o romaneio de entrega."
+        return (
+            entrega_pdf_bytes,
+            f"minuta_entrega_{sanitize_filename_part(numero_carga, 'brida')}.pdf",
+            "application/pdf",
+            "",
+        )
+
+    has_carregamento = bool(carregamento_pdf_bytes)
+    has_entrega = bool(entrega_pdf_bytes)
+    if has_carregamento and has_entrega:
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("minuta_carregamento.pdf", carregamento_pdf_bytes)
+            archive.writestr("minuta_entrega.pdf", entrega_pdf_bytes)
+        return (
+            zip_buffer.getvalue(),
+            f"minutas_{sanitize_filename_part(numero_carga, 'brida')}.zip",
+            "application/zip",
+            "",
+        )
+    if has_carregamento:
+        return (
+            carregamento_pdf_bytes,
+            f"minuta_carregamento_{sanitize_filename_part(numero_carga, 'brida')}.pdf",
+            "application/pdf",
+            "Nao foi possivel gerar o romaneio de entrega. A minuta de carregamento esta disponivel para download.",
+        )
+    if has_entrega:
+        return (
+            entrega_pdf_bytes,
+            f"minuta_entrega_{sanitize_filename_part(numero_carga, 'brida')}.pdf",
+            "application/pdf",
+            "Nao foi possivel gerar a minuta de carregamento. O romaneio de entrega esta disponivel para download.",
+        )
+    return (
+        b"",
+        "",
+        "application/pdf",
+        "Nao foi possivel gerar a minuta de carregamento e o romaneio de entrega.",
+    )
+
+
+def _run_baixar_pdf_pipeline(
+    *,
+    summary: dict[str, object],
+    processed_df: pd.DataFrame,
+    balcao_lookup_df: pd.DataFrame,
+    balcao_summary: dict[str, object],
+    module_config: MinutaModuleConfig,
+    has_excel_loaded: bool,
+    carregamento_selected: bool,
+    entrega_selected: bool,
+    confirmar_reimpressao: bool = False,
+    force_reentrega: bool = False,
+    balcao_termo: str = "",
+) -> None:
+    can_close = has_excel_loaded and not processed_df.empty
+    if balcao_termo:
+        finalize_status, fechamento_result = executar_fechamento_balcao_para_pdf(
+            termo_busca=balcao_termo,
+            summary=balcao_summary,
+            lookup_df=balcao_lookup_df,
+            gerar_minuta=carregamento_selected,
+            gerar_romaneio=entrega_selected,
+            force_reentrega=force_reentrega,
+            confirmar_reimpressao=confirmar_reimpressao,
+            standalone_balcao=True,
+        )
+    elif can_close:
+        diagnostico = get_operacional_diagnostico()
+        if diagnostico is not None:
+            if diagnostico.bloqueia_fechamento:
+                st.session_state["carregamento_finalize_error"] = (
+                    "; ".join(diagnostico.mensagens) or "Operacao bloqueada pela analise operacional."
+                )
+                return
+            if diagnostico.requer_decisao and get_operacional_decisao() is None:
+                st.session_state["carregamento_finalize_error"] = (
+                    "Selecione como deseja continuar no painel operacional antes de gerar os documentos."
+                )
+                return
+        finalize_status, fechamento_result = executar_fechamento_veiculo_para_pdf(
+            summary=summary,
+            processed_df=processed_df,
+            gerar_minuta=carregamento_selected,
+            gerar_romaneio=entrega_selected,
+            force_reentrega=force_reentrega,
+            confirmar_reimpressao=confirmar_reimpressao,
+            diagnostico=diagnostico,
+            decisao=get_operacional_decisao(),
+        )
+    else:
+        st.session_state["carregamento_finalize_error"] = (
+            "Processe um Excel valido antes de baixar os documentos."
+        )
+        return
+
+    if finalize_status in {"needs_reentrega", "balcao_needs_reentrega", "needs_reimpressao_confirm"}:
+        return
+
+    if finalize_status in {"saved", "reimpressao", "complementacao", "balcao_saved"} and fechamento_result and fechamento_result.carregamento:
+        pdf_df = processed_df
+        pdf_summary = summary
+        if balcao_termo:
+            pdf_df = localizar_nf_no_lote(balcao_lookup_df, balcao_termo)
+            pdf_summary = balcao_summary
+        numero_documento = str(fechamento_result.carregamento.numero_carregamento or "--")
+        pdf_summary = {**pdf_summary, "numero_carga": numero_documento}
+        carregamento_pdf_bytes, entrega_pdf_bytes = build_processing_pdf_bytes(
+            pdf_df,
+            pdf_summary,
+            module_config,
+            gerar_minuta=carregamento_selected,
+            gerar_romaneio=entrega_selected,
+        )
+        persistir_pdfs_apos_fechamento(
+            fechamento_result.carregamento,
+            minuta_pdf=carregamento_pdf_bytes,
+            romaneio_pdf=entrega_pdf_bytes,
+        )
+        download_payload, download_name, download_mime, validation_message = build_pdf_download_package(
+            carregamento_pdf_bytes=carregamento_pdf_bytes,
+            entrega_pdf_bytes=entrega_pdf_bytes,
+            carregamento_selected=carregamento_selected,
+            entrega_selected=entrega_selected,
+            numero_carga=numero_documento,
+        )
+        if download_payload:
+            st.session_state["pdf_download_payload"] = download_payload
+            st.session_state["pdf_download_name"] = download_name
+            st.session_state["pdf_download_mime"] = download_mime
+            st.session_state["carregamento_finalize_message"] = (
+                f"Carregamento {fechamento_result.carregamento.numero_carregamento} "
+                "salvo no banco. Documentos prontos para download."
+            )
+            if validation_message:
+                st.session_state["carregamento_finalize_warning"] = validation_message
+            else:
+                st.session_state.pop("carregamento_finalize_warning", None)
+        else:
+            st.session_state.pop("carregamento_finalize_warning", None)
+            st.session_state["carregamento_finalize_error"] = validation_message or (
+                "Nao foi possivel gerar os documentos apos o fechamento."
+            )
+        return
+
+    if finalize_status not in {"invalid", "error"}:
+        st.session_state["carregamento_finalize_error"] = (
+            "Nao foi possivel concluir o fechamento do carregamento."
+        )
+
+
+def _process_processing_screen_actions(
+    *,
+    summary: dict[str, object],
+    processed_df: pd.DataFrame,
+    balcao_lookup_df: pd.DataFrame,
+    balcao_summary: dict[str, object],
+    module_config: MinutaModuleConfig,
+    has_excel_loaded: bool,
+    carregamento_selected: bool,
+    entrega_selected: bool,
+) -> tuple[str | None, str | None, str | None]:
+    finalize_message = str(st.session_state.pop("carregamento_finalize_message", "") or "")
+    finalize_error = str(st.session_state.pop("carregamento_finalize_error", "") or "")
+    finalize_warning = str(st.session_state.pop("carregamento_finalize_warning", "") or "")
+
+    action = st.session_state.pop("_processing_action", None)
+    if not isinstance(action, dict):
+        return finalize_message or None, finalize_error or None, finalize_warning or None
+
+    action_type = str(action.get("type", "") or "")
+
+    if action_type == "finalizar_carregamento":
+        finalize_message = (
+            "O fechamento oficial do carregamento ocorre ao clicar em Baixar PDF, "
+            "apos validacao e gravacao no banco de dados."
+        )
+    elif action_type == "operacional_cancel":
+        cancelar_operacao_pendente()
+        finalize_error = "Operacao cancelada pelo operador."
+    elif action_type == "reimpressao_cancel":
+        clear_reimpressao_pending()
+        finalize_error = "Reimpressao cancelada pelo operador."
+    elif action_type == "reentrega_cancel":
+        clear_reentrega_pending()
+        clear_balcao_pending()
+        finalize_error = (
+            "Operacao cancelada. A NF nao pode ser associada novamente sem autorizacao de reentrega."
+        )
+    elif action_type == "balcao_cancel":
+        clear_balcao_pending()
+        finalize_error = "Retirada no balcao cancelada."
+    elif action_type == "balcao_iniciar":
+        termo = str(action.get("termo", "") or st.session_state.get("entrega_balcao_termo", "") or "")
+        preview_status = iniciar_entrega_balcao(
+            termo_busca=termo,
+            lookup_df=balcao_lookup_df,
+            standalone_balcao=True,
+        )
+        if preview_status == "balcao_not_found":
+            finalize_error = "NF nao encontrada nos XMLs carregados no sistema."
+    elif action_type == "reentrega_confirm":
+        reentrega_contexto = str(st.session_state.get("reentrega_contexto", "veiculo") or "veiculo")
+        if reentrega_contexto == "balcao":
+            balcao_termo = str(st.session_state.get("reentrega_balcao_termo", "") or "")
+            st.session_state["balcao_pending_confirm"] = True
+            st.session_state["balcao_confirm_termo"] = balcao_termo
+            st.session_state["balcao_force_reentrega"] = True
+            clear_reentrega_pending()
+        elif has_excel_loaded and not processed_df.empty:
+            clear_reentrega_pending()
+            _run_baixar_pdf_pipeline(
+                summary=summary,
+                processed_df=processed_df,
+                balcao_lookup_df=balcao_lookup_df,
+                balcao_summary=balcao_summary,
+                module_config=module_config,
+                has_excel_loaded=has_excel_loaded,
+                carregamento_selected=carregamento_selected,
+                entrega_selected=entrega_selected,
+                force_reentrega=True,
+            )
+            finalize_message = str(st.session_state.pop("carregamento_finalize_message", "") or "") or finalize_message
+            finalize_error = str(st.session_state.pop("carregamento_finalize_error", "") or "") or finalize_error
+            finalize_warning = str(st.session_state.pop("carregamento_finalize_warning", "") or "") or finalize_warning
+        else:
+            finalize_error = "Processe um Excel valido antes de confirmar a reentrega."
+    elif action_type == "balcao_confirm":
+        balcao_termo = str(st.session_state.get("balcao_confirm_termo", "") or "")
+        force_reentrega = bool(st.session_state.pop("balcao_force_reentrega", False))
+        _run_baixar_pdf_pipeline(
+            summary=summary,
+            processed_df=processed_df,
+            balcao_lookup_df=balcao_lookup_df,
+            balcao_summary=balcao_summary,
+            module_config=module_config,
+            has_excel_loaded=has_excel_loaded,
+            carregamento_selected=carregamento_selected,
+            entrega_selected=entrega_selected,
+            force_reentrega=force_reentrega,
+            balcao_termo=balcao_termo,
+        )
+        finalize_message = str(st.session_state.pop("carregamento_finalize_message", "") or "") or finalize_message
+        finalize_error = str(st.session_state.pop("carregamento_finalize_error", "") or "") or finalize_error
+        finalize_warning = str(st.session_state.pop("carregamento_finalize_warning", "") or "") or finalize_warning
+    elif action_type == "baixar_pdf":
+        if action.get("confirmar_reimpressao"):
+            clear_reimpressao_pending()
+        _run_baixar_pdf_pipeline(
+            summary=summary,
+            processed_df=processed_df,
+            balcao_lookup_df=balcao_lookup_df,
+            balcao_summary=balcao_summary,
+            module_config=module_config,
+            has_excel_loaded=has_excel_loaded,
+            carregamento_selected=carregamento_selected,
+            entrega_selected=entrega_selected,
+            confirmar_reimpressao=bool(action.get("confirmar_reimpressao", False)),
+            force_reentrega=bool(action.get("force_reentrega", False)),
+            balcao_termo=str(action.get("balcao_termo", "") or ""),
+        )
+        finalize_message = str(st.session_state.pop("carregamento_finalize_message", "") or "") or finalize_message
+        finalize_error = str(st.session_state.pop("carregamento_finalize_error", "") or "") or finalize_error
+        finalize_warning = str(st.session_state.pop("carregamento_finalize_warning", "") or "") or finalize_warning
+
+    return finalize_message or None, finalize_error or None, finalize_warning or None
+
+
+
+def _humanizar_mensagem_operacional(mensagem: str) -> str:
+    texto = str(mensagem or "").strip()
+    if not texto:
+        return texto
+    substituicoes = {
+        "A operacao foi bloqueada.": "Consulte o historico de cada NF para entender o contexto.",
+        "Operacao bloqueada": "Ocorrencia operacional identificada",
+    }
+    for origem, destino in substituicoes.items():
+        texto = texto.replace(origem, destino)
+    if "carregamentos diferentes" in texto:
+        return (
+            "As NFs desta planilha possuem historico vinculado a carregamentos diferentes. "
+            "Consulte o historico individual de cada NF abaixo."
+        )
+    if "pertencem ao carregamento" in texto:
+        return texto.replace(
+            "pertencem ao carregamento",
+            "possuem historico no carregamento",
+        )
+    if "ja pertencem ao carregamento" in texto:
+        return texto.replace(
+            "ja pertencem ao carregamento",
+            "ja possuem historico no carregamento",
+        )
+    return texto
+
+
+def _build_operational_panel_copy(mode: str) -> tuple[str, str, str]:
+    if mode == "reentrega":
+        conflitos = st.session_state.get("reentrega_conflitos", [])
+        warning = " ".join(str(item) for item in conflitos) if conflitos else ""
+        return (
+            "Confirmacao operacional",
+            warning,
+            "**Esta operacao e uma REENTREGA?**",
+        )
+    if mode == "reimpressao":
+        info = st.session_state.get("reimpressao_info")
+        detail = ""
+        if info is not None:
+            detail = (
+                f"**Primeira impressao:** {info.primeira_impressao_data}\n\n"
+                f"**Usuario:** {info.primeira_impressao_usuario}\n\n"
+                f"**Quantidade de impressoes:** {info.quantidade_impressoes}\n\n"
+                "**Deseja imprimir novamente?**"
+            )
+        return (
+            "Confirmacao operacional",
+            "Esta Minuta ja foi registrada anteriormente.",
+            detail,
+        )
+    if mode == "balcao_confirm":
+        return (
+            "Entrega no Balcao",
+            "",
+            "**Confirmar retirada desta Nota Fiscal no Balcao?**",
+        )
+    if mode == "balcao":
+        return (
+            "Entrega no Balcao",
+            "",
+            "",
+        )
+    if mode == "carregamento_localizado":
+        return ("Ocorrencias anteriores encontradas", "", "")
+    if mode == "carregamento_bloqueado":
+        return ("Ocorrencias anteriores encontradas", "", "")
+    if mode == "fechamento":
+        return (
+            "Fechamento operacional",
+            "",
+            "O fechamento e a impressao dos documentos ocorrem ao clicar em Baixar PDF.",
+        )
+    return ("Painel operacional", "", "")
+
+
+def _operational_panel_button_labels(mode: str) -> tuple[str, str, bool, bool]:
+    labels: dict[str, tuple[str, str, bool, bool]] = {
+        "reentrega": ("SIM", "NAO", False, False),
+        "reimpressao": ("Reimprimir", "Cancelar", False, False),
+        "balcao_confirm": ("Confirmar", "Cancelar", False, False),
+        "balcao": ("Registrar Entrega no Balcao", "—", False, True),
+        "carregamento_localizado": ("—", "Cancelar operacao", True, False),
+        "carregamento_bloqueado": ("—", "Cancelar operacao", True, False),
+        "fechamento": ("Finalizar Carregamento", "—", False, True),
+        "idle": ("—", "—", True, True),
+    }
+    return labels.get(mode, ("—", "—", True, True))
+
+
+_OPERATIONAL_ATTENTION_MODES = frozenset(
+    {
+        "reentrega",
+        "reimpressao",
+        "balcao_confirm",
+        "carregamento_bloqueado",
+        "carregamento_localizado",
+    }
+)
+
+_HISTORICO_PANEL_MODES = frozenset({"carregamento_localizado", "carregamento_bloqueado"})
+
+
+def _requires_operational_attention(mode: str) -> bool:
+    return mode in _OPERATIONAL_ATTENTION_MODES
+
+
+def _scroll_to_operational_panel() -> None:
+    components.html(
+        """
+        <script>
+        const scrollToOperationalPanel = () => {
+            const doc = window.parent.document;
+            const anchor = doc.getElementById("brida-painel-operacional");
+            if (!anchor) {
+                return;
+            }
+            anchor.scrollIntoView({ behavior: "smooth", block: "center" });
+            const panel = anchor.nextElementSibling;
+            if (panel) {
+                panel.style.transition = "box-shadow 0.6s ease";
+                panel.style.boxShadow = "0 0 0 3px rgba(37, 99, 235, 0.35)";
+                setTimeout(() => {
+                    panel.style.boxShadow = "";
+                }, 1800);
+            }
+        };
+        window.parent.requestAnimationFrame(() => setTimeout(scrollToOperationalPanel, 150));
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _scroll_to_decisao_operacional() -> None:
+    components.html(
+        """
+        <script>
+        const scrollToDecisao = () => {
+            const doc = window.parent.document;
+            const anchor = doc.getElementById("brida-decisao-operacional");
+            if (!anchor) {
+                return;
+            }
+            anchor.scrollIntoView({ behavior: "smooth", block: "center" });
+        };
+        window.parent.requestAnimationFrame(() => setTimeout(scrollToDecisao, 150));
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _render_operational_panel(mode: str, saved_id: object, processed_df=None) -> None:
+    st.session_state["_operational_panel_mode"] = mode
+    title, warning_text, detail_markdown = _build_operational_panel_copy(mode)
+    primary_label, secondary_label, primary_disabled, secondary_disabled = _operational_panel_button_labels(mode)
+    historico_modes = {"carregamento_localizado", "carregamento_bloqueado"}
+
+    st.markdown('<div id="brida-painel-operacional"></div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown(f'<div class="section-title">{html.escape(title)}</div>', unsafe_allow_html=True)
+        if mode not in historico_modes and warning_text:
+            st.warning(warning_text)
+
+        if detail_markdown and mode not in historico_modes:
+            st.markdown(detail_markdown)
+        elif mode == "fechamento":
+            st.markdown(
+                '<p class="fechamento-operacional-caption">'
+                "O fechamento e a impressao dos documentos ocorrem ao clicar em Baixar PDF."
+                "</p>",
+                unsafe_allow_html=True,
+            )
+
+        if mode in historico_modes and processed_df is not None:
+            render_historico_nfs_contexto(processed_df, scope="painel")
+
+        if mode in historico_modes:
+            if st.session_state.pop("auditoria_nf_foco_decisao_painel", False):
+                _scroll_to_decisao_operacional()
+            diagnostico = get_operacional_diagnostico()
+            if diagnostico and diagnostico.opcoes_decisao:
+                st.markdown('<div id="brida-decisao-operacional"></div>', unsafe_allow_html=True)
+                st.markdown("**Como deseja continuar?**")
+                opcoes = [item.value for item in diagnostico.opcoes_decisao]
+                st.radio(
+                    "Decisao operacional",
+                    options=opcoes,
+                    format_func=lambda value: DECISAO_OPERACIONAL_LABELS.get(
+                        DecisaoOperacional(str(value)),
+                        str(value),
+                    ),
+                    key="operacional_decisao",
+                    label_visibility="collapsed",
+                )
+
+        st.text_input(
+            "Entrega no Balcao",
+            key="entrega_balcao_termo",
+            placeholder="NF ou Chave da NF para Entrega no Balcao",
+            label_visibility="collapsed",
+            disabled=mode != "balcao" or bool(st.session_state.get("balcao_pending_confirm")),
+        )
+
+        panel_col_primary, panel_col_secondary = st.columns(2, gap="medium")
+        with panel_col_primary:
+            st.button(
+                primary_label,
+                key="processing_panel_primary",
+                use_container_width=True,
+                disabled=primary_disabled,
+                on_click=on_processing_panel_primary_click,
+            )
+        with panel_col_secondary:
+            st.button(
+                secondary_label,
+                key="processing_panel_secondary",
+                use_container_width=True,
+                disabled=secondary_disabled,
+                on_click=on_processing_panel_secondary_click,
+            )
+
+        saved_caption = (
+            f"Carregamento registrado no banco (ID {saved_id})."
+            if saved_id
+            else " "
+        )
+        st.caption(saved_caption)
+
+
+def _render_processing_export_panel(
+    *,
+    module_config: MinutaModuleConfig,
+    carregamento_checkbox_key: str,
+    entrega_checkbox_key: str,
+    validation_message: str,
+    can_close: bool,
+    download_payload: bytes,
+    download_name: str,
+    download_mime: str,
+) -> None:
+    st.markdown(f'<div class="section-title export-title">{html.escape(module_config.export_label)}</div>', unsafe_allow_html=True)
+    checkbox_col_1, checkbox_col_2, button_col = st.columns([1.1, 0.9, 1.1], gap="small")
+    with checkbox_col_1:
+        st.checkbox("Minuta de Carregamento", key=carregamento_checkbox_key)
+    with checkbox_col_2:
+        st.checkbox("Romaneio de Entrega", key=entrega_checkbox_key)
+    with button_col:
+        st.button(
+            "Gerar PDF",
+            use_container_width=True,
+            key="preparar_baixar_pdf_button",
+            disabled=bool(validation_message) and not can_close,
+            on_click=on_baixar_pdf_click,
+        )
+        st.download_button(
+            "Baixar PDF",
+            data=download_payload,
+            file_name=download_name,
+            mime=download_mime,
+            use_container_width=True,
+            key="baixar_pdf_download_button",
+            disabled=not download_payload,
+        )
+    if validation_message and not download_payload:
+        st.info(validation_message)
 
 
 def render_processing_screen(
@@ -4649,8 +5424,128 @@ def render_processing_screen(
     process_minuta_inputs(process_clicked, xml_records, excel_file)
 
     summary = st.session_state.summary
-    route_version = get_path_cache_token(PRACAS_JSON_PATH)
-    processed_df = prepare_processed_search_dataframe(st.session_state.processed_df, route_version)
+    processed_df = get_prepared_processed_dataframe()
+    has_excel_loaded = excel_file is not None
+    balcao_lookup_df = get_balcao_lookup_dataframe(xml_records)
+    balcao_summary = build_balcao_summary()
+    carregamento_checkbox_key = f"{module_config.screen_key}_pdf_carregamento"
+    entrega_checkbox_key = f"{module_config.screen_key}_pdf_entrega"
+
+    if carregamento_checkbox_key not in st.session_state:
+        st.session_state[carregamento_checkbox_key] = True
+    if entrega_checkbox_key not in st.session_state:
+        st.session_state[entrega_checkbox_key] = False
+
+    carregamento_selected = bool(st.session_state.get(carregamento_checkbox_key, True))
+    entrega_selected = bool(st.session_state.get(entrega_checkbox_key, False))
+
+    sync_processing_context_for_excel(has_excel_loaded)
+    finalize_message, finalize_error, finalize_warning = _process_processing_screen_actions(
+        summary=summary,
+        processed_df=processed_df,
+        balcao_lookup_df=balcao_lookup_df,
+        balcao_summary=balcao_summary,
+        module_config=module_config,
+        has_excel_loaded=has_excel_loaded,
+        carregamento_selected=carregamento_selected,
+        entrega_selected=entrega_selected,
+    )
+    operational_panel_mode = resolve_operational_panel_mode(
+        has_excel_loaded=has_excel_loaded,
+        processed_df_empty=processed_df.empty,
+    )
+    saved_id = st.session_state.get("carregamento_saved_id")
+
+    filtered_df = processed_df
+    display_df = get_display_table_dataframe(filtered_df)
+    styled_display_df = build_status_styler(display_df)
+
+    download_payload = st.session_state.get("pdf_download_payload") or b""
+    download_name = str(st.session_state.get("pdf_download_name", "") or "documento.pdf")
+    download_mime = str(st.session_state.get("pdf_download_mime", "application/pdf") or "application/pdf")
+    can_close = has_excel_loaded and not processed_df.empty
+    validation_message = ""
+    diagnostico = get_operacional_diagnostico()
+    if diagnostico and diagnostico.bloqueia_fechamento:
+        if diagnostico.requer_decisao and get_operacional_decisao() is None:
+            validation_message = (
+                "Revise o historico das NFs no painel operacional e selecione como deseja continuar."
+            )
+        else:
+            validation_message = "; ".join(
+                _humanizar_mensagem_operacional(item) for item in diagnostico.mensagens
+            ) or "Revise as ocorrencias operacionais antes de continuar."
+    elif diagnostico and diagnostico.requer_decisao and get_operacional_decisao() is None:
+        validation_message = "Selecione como deseja continuar no painel operacional."
+    elif not carregamento_selected and not entrega_selected:
+        validation_message = "Selecione ao menos um tipo de minuta para gerar o PDF"
+    elif not can_close and not st.session_state.get("balcao_pending_confirm"):
+        validation_message = "Processe um Excel valido para habilitar o fechamento via Baixar PDF."
+
+    use_full_width_historico = (
+        has_excel_loaded
+        and not processed_df.empty
+        and operational_panel_mode in _HISTORICO_PANEL_MODES
+    )
+    export_kwargs = {
+        "module_config": module_config,
+        "carregamento_checkbox_key": carregamento_checkbox_key,
+        "entrega_checkbox_key": entrega_checkbox_key,
+        "validation_message": validation_message,
+        "can_close": can_close,
+        "download_payload": download_payload,
+        "download_name": download_name,
+        "download_mime": download_mime,
+    }
+
+    if use_full_width_historico:
+        _render_operational_panel(
+            operational_panel_mode,
+            saved_id,
+            processed_df,
+        )
+        if (
+            process_clicked
+            and _requires_operational_attention(operational_panel_mode)
+        ):
+            _scroll_to_operational_panel()
+        if finalize_message:
+            st.success(finalize_message)
+        if finalize_warning:
+            st.warning(finalize_warning)
+        if finalize_error:
+            st.error(finalize_error)
+
+        export_spacer, export_col = st.columns([3.2, 1.8], gap="medium")
+        with export_spacer:
+            pass
+        with export_col:
+            _render_processing_export_panel(**export_kwargs)
+    else:
+        action_col_search, action_col_download = st.columns([2.0, 1.8], gap="medium")
+
+        with action_col_search:
+            _render_operational_panel(
+                operational_panel_mode,
+                saved_id,
+                processed_df if has_excel_loaded and not processed_df.empty else None,
+            )
+            if (
+                process_clicked
+                and has_excel_loaded
+                and not processed_df.empty
+                and _requires_operational_attention(operational_panel_mode)
+            ):
+                _scroll_to_operational_panel()
+            if finalize_message:
+                st.success(finalize_message)
+            if finalize_warning:
+                st.warning(finalize_warning)
+            if finalize_error:
+                st.error(finalize_error)
+
+        with action_col_download:
+            _render_processing_export_panel(**export_kwargs)
 
     render_section_heading("Dados Gerais", "dados_gerais")
     dados_col_1, dados_col_2, dados_col_3 = st.columns(3, gap="medium")
@@ -4685,118 +5580,16 @@ def render_processing_screen(
         with st.expander("Debug de correspondencia NF x XML", expanded=False):
             st.dataframe(st.session_state.nf_debug, use_container_width=True, hide_index=True)
 
-    action_col_search, action_col_download = st.columns([2.0, 1.8], gap="medium")
+    if has_excel_loaded and not processed_df.empty:
+        render_auditoria_nf_expander(processed_df=processed_df)
 
-    with action_col_search:
-        st.markdown('<div class="section-title">Localizar registros</div>', unsafe_allow_html=True)
-        search_term = st.text_input("Pesquisar (qualquer coluna)", placeholder="Buscar NF, produto, destinatario ou status")
-
-    normalized_search_term = str(search_term or "").strip().lower()
-    if normalized_search_term and not processed_df.empty:
-        filtered_df = processed_df[processed_df["_search_blob"].str.contains(normalized_search_term, na=False)]
-    else:
-        filtered_df = processed_df
-
-    display_df = build_display_table(filtered_df[TABLE_COLUMNS].copy())
-    styled_display_df = build_status_styler(display_df)
-
-    minuta_records = build_minuta_records(processed_df)
-    entrega_records, _, entrega_totals = build_minuta_entrega_records(processed_df)
-    transportadora = str(summary.get("transportadora", "BRIDA LUBRIFICANTES LTDA") or "BRIDA LUBRIFICANTES LTDA")
-
-    carregamento_pdf_bytes = b""
-    if minuta_records:
-        carregamento_pdf_bytes = generate_minuta_pdf(
-            dados_minuta=minuta_records,
-            numero_carga=str(summary.get("numero_carga", "--") or "--"),
-            data_emissao=str(st.session_state.document_issue_at or "--"),
-            veiculo=str(summary.get("placa", "--") or "--"),
-            motorista=str(summary.get("motorista", "--") or "--"),
-            pdf_title=module_config.pdf_title,
-            subject_label=module_config.subject_label,
+    if not has_excel_loaded and st.session_state.get("balcao_pending_confirm"):
+        preview_termo = str(
+            st.session_state.get("balcao_confirm_termo", "")
+            or st.session_state.get("entrega_balcao_termo", "")
+            or ""
         )
-
-    entrega_pdf_bytes = b""
-    if entrega_records:
-        entrega_pdf_bytes = generate_minuta_entrega_pdf(
-            records=entrega_records,
-            totals=entrega_totals,
-            numero_documento=str(summary.get("numero_carga", "--") or "--"),
-            data_emissao=str(st.session_state.document_issue_at or "--"),
-            transportadora=transportadora,
-            veiculo=str(summary.get("placa", "--") or "--"),
-            motorista=str(summary.get("motorista", "--") or "--"),
-            placa=str(summary.get("placa", "--") or "--"),
-        )
-
-    with action_col_download:
-        st.markdown(f'<div class="section-title export-title">{html.escape(module_config.export_label)}</div>', unsafe_allow_html=True)
-        carregamento_checkbox_key = f"{module_config.screen_key}_pdf_carregamento"
-        entrega_checkbox_key = f"{module_config.screen_key}_pdf_entrega"
-        if carregamento_checkbox_key not in st.session_state:
-            st.session_state[carregamento_checkbox_key] = True
-        if entrega_checkbox_key not in st.session_state:
-            st.session_state[entrega_checkbox_key] = False
-
-        checkbox_col_1, checkbox_col_2, button_col = st.columns([1.1, 0.9, 1.1], gap="small")
-        with checkbox_col_1:
-            st.checkbox("Minuta de Carregamento", key=carregamento_checkbox_key)
-        with checkbox_col_2:
-            st.checkbox("Minuta de Entrega", key=entrega_checkbox_key)
-
-        carregamento_selected = bool(st.session_state.get(carregamento_checkbox_key))
-        entrega_selected = bool(st.session_state.get(entrega_checkbox_key))
-
-        download_payload = b""
-        download_name = ""
-        download_mime = "application/pdf"
-        validation_message = ""
-
-        if not carregamento_selected and not entrega_selected:
-            validation_message = "Selecione ao menos um tipo de minuta para gerar o PDF"
-        elif carregamento_selected and not entrega_selected:
-            if not carregamento_pdf_bytes:
-                validation_message = "Nao ha dados disponiveis para gerar a minuta de carregamento."
-            else:
-                download_payload = carregamento_pdf_bytes
-                download_name = f"minuta_carregamento_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.pdf"
-        elif entrega_selected and not carregamento_selected:
-            if not entrega_pdf_bytes:
-                validation_message = "Nao ha dados validos disponiveis para gerar a minuta de entrega."
-            else:
-                download_payload = entrega_pdf_bytes
-                download_name = f"minuta_entrega_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.pdf"
-        else:
-            missing_documents: list[str] = []
-            if not carregamento_pdf_bytes:
-                missing_documents.append("carregamento")
-            if not entrega_pdf_bytes:
-                missing_documents.append("entrega")
-
-            if missing_documents:
-                missing_label = " e ".join(missing_documents)
-                validation_message = f"Nao foi possivel gerar a minuta de {missing_label}."
-            else:
-                zip_buffer = BytesIO()
-                with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-                    archive.writestr("minuta_carregamento.pdf", carregamento_pdf_bytes)
-                    archive.writestr("minuta_entrega.pdf", entrega_pdf_bytes)
-                download_payload = zip_buffer.getvalue()
-                download_name = f"minutas_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.zip"
-                download_mime = "application/zip"
-
-        with button_col:
-            st.download_button(
-                "Baixar PDF",
-                data=download_payload,
-                file_name=download_name,
-                mime=download_mime,
-                use_container_width=True,
-                disabled=not bool(download_payload),
-            )
-
-        if validation_message:
-            st.warning(validation_message)
+        render_balcao_nf_preview(balcao_lookup_df, preview_termo)
 
     st.markdown(f"### {module_config.panel_title}")
     st.caption(module_config.panel_caption)
@@ -4806,98 +5599,6 @@ def render_processing_screen(
         hide_index=True,
         column_config=build_table_column_config(display_df),
         row_height=56,
-    )
-
-
-def render_delivery_screen(process_clicked: bool, xml_records: list, excel_file) -> None:
-    process_minuta_inputs(process_clicked, xml_records, excel_file)
-
-    summary = st.session_state.summary
-    processed_df = st.session_state.processed_df.copy()
-    entrega_records, entrega_issues, totals = build_minuta_entrega_records(processed_df)
-    transportadora = str(summary.get("transportadora", "BRIDA LUBRIFICANTES LTDA") or "BRIDA LUBRIFICANTES LTDA")
-
-    render_section_heading("Dados Gerais", "dados_gerais")
-    dados_col_1, dados_col_2, dados_col_3 = st.columns(3, gap="medium")
-    with dados_col_1:
-        render_info_card("Filial", summary["filial"], "filial")
-    with dados_col_2:
-        render_info_card("Carregamento", summary["numero_carga"], "carregamento")
-    with dados_col_3:
-        render_info_card("Data Emissao", st.session_state.get("document_issue_at", "--"), "data_saida")
-
-    dados_col_4, dados_col_5, dados_col_6 = st.columns(3, gap="medium")
-    with dados_col_4:
-        render_info_card("Transportadora", transportadora, "motorista")
-    with dados_col_5:
-        render_info_card("Veiculo", summary["placa"], "placa")
-    with dados_col_6:
-        render_info_card("Motorista", summary["motorista"], "motorista")
-
-    render_section_heading("Resumo da Entrega", "resumo_carga")
-    render_metric_cards_row(
-        [
-            {"title": "Notas", "value": totals["total_nfs"], "icon_key": "nf"},
-            {"title": "Volumes", "value": f"{totals['total_volumes']:.0f}", "icon_key": "itens"},
-            {"title": "Peso Total", "value": f"{totals['total_peso'] / 1000:.3f} t", "icon_key": "peso"},
-            {"title": "Valor Total", "value": f"R$ {format_decimal_br(totals['total_valor'])}", "icon_key": "dados_gerais"},
-        ]
-    )
-
-    delivery_df = build_delivery_table_dataframe(entrega_records)
-    search_col, action_col = st.columns([2.2, 1.4], gap="medium")
-    with search_col:
-        st.markdown('<div class="section-title">Localizar entregas</div>', unsafe_allow_html=True)
-        search_term = st.text_input("Pesquisar entrega", placeholder="Buscar nota, cliente, cidade, UF ou rota")
-
-    normalized_search_term = str(search_term or "").strip().lower()
-    if normalized_search_term and not delivery_df.empty:
-        search_mask = delivery_df.astype(str).apply(lambda column: column.str.lower().str.contains(normalized_search_term, na=False))
-        delivery_df = delivery_df[search_mask.any(axis=1)]
-
-    pdf_bytes = b""
-    if entrega_records:
-        try:
-            pdf_bytes = generate_minuta_entrega_pdf(
-                records=entrega_records,
-                totals=totals,
-                numero_documento=str(summary.get("numero_carga", "--") or "--"),
-                data_emissao=str(st.session_state.get("document_issue_at", "--") or "--"),
-                transportadora=transportadora,
-                veiculo=str(summary.get("placa", "--") or "--"),
-                motorista=str(summary.get("motorista", "--") or "--"),
-                placa=str(summary.get("placa", "--") or "--"),
-            )
-        except Exception as exc:
-            st.error(f"Erro ao gerar o PDF da minuta de entrega: {exc}")
-    elif process_clicked or not processed_df.empty:
-        st.error("Nenhuma NF valida foi encontrada para gerar a minuta de entrega.")
-
-    with action_col:
-        st.markdown('<div class="section-title export-title">Exportacao</div>', unsafe_allow_html=True)
-        pdf_button_col, print_button_col = st.columns(2, gap="small")
-        with pdf_button_col:
-            st.download_button(
-                "Baixar PDF",
-                data=pdf_bytes,
-                file_name=f"minuta_entrega_{sanitize_filename_part(summary.get('numero_carga'), 'brida')}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-                disabled=not bool(pdf_bytes),
-            )
-        with print_button_col:
-            print_disabled = not bool(pdf_bytes)
-            if st.button("Imprimir PDF", use_container_width=True, disabled=print_disabled):
-                open_pdf_for_print(pdf_bytes, "Minuta de Entrega")
-
-    st.markdown("### Painel da Minuta de Entrega")
-    st.caption("Romaneio limpo por nota fiscal, pronto para impressao e conferência operacional em campo.")
-    st.dataframe(
-        delivery_df,
-        width="stretch",
-        hide_index=True,
-        column_config=build_delivery_table_column_config(),
-        row_height=48,
     )
 
 
@@ -4920,7 +5621,7 @@ def render_separacao_screen(
     if latest_closed_lote_id and latest_closed_records:
         latest_closed_lote["Abertura Formatada"] = format_datetime_display(parse_xml_datetime(latest_closed_lote.get("Abertura", ""))) or "--"
         latest_closed_lote["Fechamento Formatada"] = format_datetime_display(parse_xml_datetime(latest_closed_lote.get("Fechamento", ""))) or "--"
-        latest_closed_pdf_bytes = generate_lote_pdf(latest_closed_lote, latest_closed_records)
+        latest_closed_pdf_bytes = get_latest_closed_lote_pdf_bytes(latest_closed_lote, latest_closed_records, latest_closed_lote_id)
 
     st.markdown(
         """
@@ -5047,35 +5748,32 @@ def render_separacao_screen(
                 st.rerun()
 
     summary = summarize_separacao(current_records)
-    render_box_open()
-    render_section_heading("Visão Operacional", "separacao")
-    render_metric_cards_row(
-        [
-            {"title": "Notas", "value": summary["nf_total"], "icon_key": "nf"},
-            {"title": "Pendentes", "value": summary["pendentes"], "icon_key": "processar"},
-            {"title": "Separadas", "value": summary["separadas"], "icon_key": "status_operacional"},
-            {"title": "Lotes Fech.", "value": summary["lotes_fechados"], "icon_key": "erros"},
-        ]
-    )
-    render_box_close()
+    with ui_section_box():
+        render_section_heading("Visão Operacional", "separacao")
+        render_metric_cards_row(
+            [
+                {"title": "Notas", "value": summary["nf_total"], "icon_key": "nf"},
+                {"title": "Pendentes", "value": summary["pendentes"], "icon_key": "processar"},
+                {"title": "Separadas", "value": summary["separadas"], "icon_key": "status_operacional"},
+                {"title": "Lotes Fech.", "value": summary["lotes_fechados"], "icon_key": "erros"},
+            ]
+        )
 
-    render_box_open()
-    render_section_heading("Entrada", "barcode")
-    st.markdown('<div class="scan-shell">', unsafe_allow_html=True)
-    with st.form("separacao_scan_form", clear_on_submit=True):
-        scan_col, action_col = st.columns([4.4, 1.2], gap="medium")
-        with scan_col:
-            chave_digitada = st.text_input(
-                "Bipar ou digitar chave da NF",
-                key="input_chave",
-                placeholder="Aguardando leitura...",
-            )
-        with action_col:
-            st.markdown('<div class="scan-button-spacer"></div>', unsafe_allow_html=True)
-            buscar = st.form_submit_button("Buscar", use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-    render_scan_input_focus()
-    render_box_close()
+    with ui_section_box():
+        render_section_heading("Entrada", "barcode")
+        with st.container(border=True):
+            with st.form("separacao_scan_form", clear_on_submit=True):
+                scan_col, action_col = st.columns([4.4, 1.2], gap="medium")
+                with scan_col:
+                    chave_digitada = st.text_input(
+                        "Bipar ou digitar chave da NF",
+                        key="input_chave",
+                        placeholder="Aguardando leitura...",
+                    )
+                with action_col:
+                    st.markdown('<div class="scan-button-spacer"></div>', unsafe_allow_html=True)
+                    buscar = st.form_submit_button("Buscar", use_container_width=True)
+        render_scan_input_focus()
 
     if buscar:
         chave_normalizada = normalize_chave_nfe(chave_digitada)
@@ -5130,113 +5828,110 @@ def render_separacao_screen(
 
     separacao_result = st.session_state.get("separacao_result")
     if separacao_result:
-        render_box_open()
-        render_section_heading("Resultado da Separação", "status_operacional")
-        result_col_1, result_col_2, result_col_3, result_col_4, result_col_5, result_col_6 = st.columns(6, gap="medium")
-        with result_col_1:
-            render_info_card("NF", separacao_result.get("NF", "--"), "nf")
-        with result_col_2:
-            render_info_card("Cliente", separacao_result.get("Cliente", "--"), "dados_gerais")
-        with result_col_3:
-            render_info_card("Rota", separacao_result.get("Rota", UNDEFINED_ROUTE_LABEL), "rota")
-        with result_col_4:
-            sector_colors = get_sector_colors(separacao_result.get("Setor", "Não Identificados"))
-            render_highlight_card("Setor", separacao_result.get("Setor", "--"), sector_colors["border"], separacao_result.get("Setores", ""))
-        with result_col_5:
-            render_highlight_card("Lote", separacao_result.get("Lote", "Sem lote"), "#1D4ED8", separacao_result.get("Status Lote", "Sem lote"))
-        with result_col_6:
-            status_color = "#B42318" if is_canceled_nf_status(separacao_result.get("Status NF", "")) else "#22C55E"
-            render_highlight_card("Status NF", separacao_result.get("Status NF", "--"), status_color, f"Produtos: {separacao_result.get('Produtos', '--')}")
-        render_box_close()
+        with ui_section_box():
+            render_section_heading("Resultado da Separação", "status_operacional")
+            result_col_1, result_col_2, result_col_3, result_col_4, result_col_5, result_col_6 = st.columns(6, gap="medium")
+            with result_col_1:
+                render_info_card("NF", separacao_result.get("NF", "--"), "nf")
+            with result_col_2:
+                render_info_card("Cliente", separacao_result.get("Cliente", "--"), "dados_gerais")
+            with result_col_3:
+                render_info_card("Rota", separacao_result.get("Rota", UNDEFINED_ROUTE_LABEL), "rota")
+            with result_col_4:
+                sector_colors = get_sector_colors(separacao_result.get("Setor", "Não Identificados"))
+                render_highlight_card("Setor", separacao_result.get("Setor", "--"), sector_colors["border"], separacao_result.get("Setores", ""))
+            with result_col_5:
+                render_highlight_card("Lote", separacao_result.get("Lote", "Sem lote"), "#1D4ED8", separacao_result.get("Status Lote", "Sem lote"))
+            with result_col_6:
+                status_color = "#B42318" if is_canceled_nf_status(separacao_result.get("Status NF", "")) else "#22C55E"
+                render_highlight_card("Status NF", separacao_result.get("Status NF", "--"), status_color, f"Produtos: {separacao_result.get('Produtos', '--')}")
 
     cleanup_feedback = st.session_state.get("data_cleanup_feedback")
     current_xml_records, _ = carregar_xmls_processados_json(str(XMLS_PROCESSADOS_JSON_PATH))
     current_lotes_registry, _ = carregar_lotes_json(str(LOTES_JSON_PATH))
 
-    render_box_open()
-    st.markdown(
-        """
+    with ui_section_box():
+        st.markdown(
+            """
     <div class="page-hero" style="margin-top: 1.25rem;">
         <h2>Gestão de Dados do Sistema</h2>
         <p>Limpeza e controle de XMLs, separações e lotes</p>
     </div>
     """,
-        unsafe_allow_html=True,
-    )
+            unsafe_allow_html=True,
+        )
 
-    render_metric_cards_row(
-        [
-            {"title": "XMLs", "value": len(current_xml_records), "icon_key": "xml"},
-            {"title": "Separações", "value": len(current_records), "icon_key": "separacao"},
-            {"title": "Lotes", "value": len(current_lotes_registry), "icon_key": "lotes"},
-            {"title": "Total Bases", "value": len(current_xml_records) + len(current_records) + len(current_lotes_registry), "icon_key": "dados_gerais"},
-        ]
-    )
+        render_metric_cards_row(
+            [
+                {"title": "XMLs", "value": len(current_xml_records), "icon_key": "xml"},
+                {"title": "Separações", "value": len(current_records), "icon_key": "separacao"},
+                {"title": "Lotes", "value": len(current_lotes_registry), "icon_key": "lotes"},
+                {"title": "Total Bases", "value": len(current_xml_records) + len(current_records) + len(current_lotes_registry), "icon_key": "dados_gerais"},
+            ]
+        )
 
-    size_col_1, size_col_2, size_col_3 = st.columns(3, gap="medium")
-    with size_col_1:
-        render_info_card("Base XMLs", format_file_size_mb(XMLS_PROCESSADOS_JSON_PATH), "xml", "Arquivo json de XMLs processados")
-    with size_col_2:
-        render_info_card("Base Separação", format_file_size_mb(SEPARACAO_JSON_PATH), "separacao", "Arquivo json do mapa de separação")
-    with size_col_3:
-        render_info_card("Base Lotes", format_file_size_mb(LOTES_JSON_PATH), "lotes", "Arquivo json dos lotes registrados")
+        size_col_1, size_col_2, size_col_3 = st.columns(3, gap="medium")
+        with size_col_1:
+            render_info_card("Base XMLs", format_file_size_mb(XMLS_PROCESSADOS_JSON_PATH), "xml", "Arquivo json de XMLs processados")
+        with size_col_2:
+            render_info_card("Base Separação", format_file_size_mb(SEPARACAO_JSON_PATH), "separacao", "Arquivo json do mapa de separação")
+        with size_col_3:
+            render_info_card("Base Lotes", format_file_size_mb(LOTES_JSON_PATH), "lotes", "Arquivo json dos lotes registrados")
 
-    st.warning("Essa ação não pode ser desfeita.")
+        st.warning("Essa ação não pode ser desfeita.")
 
-    if isinstance(cleanup_feedback, dict) and cleanup_feedback:
-        if cleanup_feedback.get("total_removido", 0) > 0:
-            st.success("Limpeza realizada com sucesso")
-        else:
-            st.info("Nenhum registro foi removido com os critérios informados.")
+        if isinstance(cleanup_feedback, dict) and cleanup_feedback:
+            if cleanup_feedback.get("total_removido", 0) > 0:
+                st.success("Limpeza realizada com sucesso")
+            else:
+                st.info("Nenhum registro foi removido com os critérios informados.")
 
-        st.markdown(
-            "\n".join(
-                [
-                    f"Período: {cleanup_feedback.get('periodo', '--')}",
-                    f"XMLs removidos: {cleanup_feedback.get('xmls_removidos', 0)}",
-                    f"Registros de separação removidos: {cleanup_feedback.get('separacao_removidos', 0)}",
-                    f"Lotes removidos: {cleanup_feedback.get('lotes_removidos', 0)}",
-                ]
+            st.markdown(
+                "\n".join(
+                    [
+                        f"Período: {cleanup_feedback.get('periodo', '--')}",
+                        f"XMLs removidos: {cleanup_feedback.get('xmls_removidos', 0)}",
+                        f"Registros de separação removidos: {cleanup_feedback.get('separacao_removidos', 0)}",
+                        f"Lotes removidos: {cleanup_feedback.get('lotes_removidos', 0)}",
+                    ]
+                )
             )
-        )
 
-        protected_xmls = cleanup_feedback.get("xmls_protegidos", 0)
-        protected_lotes = cleanup_feedback.get("lotes_protegidos", 0)
-        if protected_xmls:
-            st.warning(f"{protected_xmls} XML(s) permaneceram na base por ainda estarem em uso na separação.")
-        if protected_lotes:
-            st.warning(f"{protected_lotes} lote(s) abertos permaneceram na base por proteção operacional.")
+            protected_xmls = cleanup_feedback.get("xmls_protegidos", 0)
+            protected_lotes = cleanup_feedback.get("lotes_protegidos", 0)
+            if protected_xmls:
+                st.warning(f"{protected_xmls} XML(s) permaneceram na base por ainda estarem em uso na separação.")
+            if protected_lotes:
+                st.warning(f"{protected_lotes} lote(s) abertos permaneceram na base por proteção operacional.")
 
-    cleanup_col_1, cleanup_col_2, cleanup_col_3 = st.columns([1.2, 1.2, 1.6], gap="medium")
-    with cleanup_col_1:
-        cleanup_start_date = st.date_input("Data inicial", key="data_cleanup_start_date")
-    with cleanup_col_2:
-        cleanup_end_date = st.date_input("Data final", key="data_cleanup_end_date")
-    with cleanup_col_3:
-        cleanup_type = st.selectbox(
-            "Tipo de limpeza",
-            options=DATA_CLEANUP_OPTIONS,
-            key="data_cleanup_type",
-        )
+        cleanup_col_1, cleanup_col_2, cleanup_col_3 = st.columns([1.2, 1.2, 1.6], gap="medium")
+        with cleanup_col_1:
+            cleanup_start_date = st.date_input("Data inicial", key="data_cleanup_start_date")
+        with cleanup_col_2:
+            cleanup_end_date = st.date_input("Data final", key="data_cleanup_end_date")
+        with cleanup_col_3:
+            cleanup_type = st.selectbox(
+                "Tipo de limpeza",
+                options=DATA_CLEANUP_OPTIONS,
+                key="data_cleanup_type",
+            )
 
-    cleanup_submitted = st.button("Limpar Dados", use_container_width=True, type="primary", key="execute_data_cleanup")
+        cleanup_submitted = st.button("Limpar Dados", use_container_width=True, type="primary", key="execute_data_cleanup")
 
-    if cleanup_submitted:
-        try:
-            with st.spinner("Limpando dados..."):
-                cleanup_result = executar_limpeza_dados_sistema(cleanup_start_date, cleanup_end_date, cleanup_type)
+        if cleanup_submitted:
+            try:
+                with st.spinner("Limpando dados..."):
+                    cleanup_result = executar_limpeza_dados_sistema(cleanup_start_date, cleanup_end_date, cleanup_type)
 
-            st.session_state["data_cleanup_feedback"] = cleanup_result
-            st.session_state["separacao_records"] = cleanup_result.get("separacao_records", [])
-            st.session_state["separacao_result"] = None
-            st.session_state["separacao_feedback"] = {}
-            st.session_state["lote_atual"] = build_lote_payload("", "", "")
-            invalidate_runtime_data()
-            st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
-
-    render_box_close()
+                st.session_state["data_cleanup_feedback"] = cleanup_result
+                st.session_state["separacao_records"] = cleanup_result.get("separacao_records", [])
+                st.session_state["separacao_result"] = None
+                st.session_state["separacao_feedback"] = {}
+                st.session_state["lote_atual"] = build_lote_payload("", "", "")
+                invalidate_runtime_data()
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
 
 
 def render_lotes_management_screen(separacao_records: list[dict[str, object]]) -> None:
@@ -5540,14 +6235,11 @@ def initialize_app_state() -> None:
     if "document_issue_at" not in st.session_state:
         st.session_state.document_issue_at = format_datetime_display()
 
-    if "pracas_upload_signature" not in st.session_state:
-        st.session_state.pracas_upload_signature = ""
+    if "xml_upload_batch" not in st.session_state:
+        st.session_state.xml_upload_batch = {}
 
-    if "pracas_upload_message" not in st.session_state:
-        st.session_state.pracas_upload_message = ""
-
-    if "pracas_upload_error" not in st.session_state:
-        st.session_state.pracas_upload_error = ""
+    if "xml_add_uploader_open" not in st.session_state:
+        st.session_state.xml_add_uploader_open = False
 
     if "xml_upload_signature" not in st.session_state:
         st.session_state.xml_upload_signature = ""
@@ -5555,20 +6247,14 @@ def initialize_app_state() -> None:
     if "xml_upload_message" not in st.session_state:
         st.session_state.xml_upload_message = ""
 
+    if "xml_upload_summary" not in st.session_state:
+        st.session_state.xml_upload_summary = {}
+
     if "xml_upload_error" not in st.session_state:
         st.session_state.xml_upload_error = ""
 
     if "xml_upload_issues" not in st.session_state:
         st.session_state.xml_upload_issues = []
-
-    if "classificacao_upload_signature" not in st.session_state:
-        st.session_state.classificacao_upload_signature = ""
-
-    if "classificacao_upload_message" not in st.session_state:
-        st.session_state.classificacao_upload_message = ""
-
-    if "classificacao_upload_error" not in st.session_state:
-        st.session_state.classificacao_upload_error = ""
 
     if "runtime_refresh_required" not in st.session_state:
         st.session_state["runtime_refresh_required"] = False
@@ -5612,13 +6298,34 @@ def initialize_app_state() -> None:
     if "lotes_filter_lote" not in st.session_state:
         st.session_state["lotes_filter_lote"] = "Todos"
 
+    if "runtime_xml_storage_error" not in st.session_state:
+        st.session_state["runtime_xml_storage_error"] = ""
+
+    if "_processed_data_version" not in st.session_state:
+        st.session_state["_processed_data_version"] = 0
+
 
 def render_global_app_styles() -> None:
+    # O Streamlit reconstrói o DOM a cada rerun; o CSS via st.markdown deve ser
+    # reinjetado em toda execução. Cache apenas a string, nunca pular a injeção.
     st.markdown(
         """
     <style>
+    :root {
+        --brida-navy: #1F3A5F;
+        --brida-navy-hover: #25486E;
+        --brida-blue-soft: #E8F1FF;
+        --brida-border: rgba(31, 58, 95, 0.12);
+        --brida-shadow: 0 4px 12px rgba(31, 58, 95, 0.06);
+        --brida-radius: 12px;
+        --brida-gray-bg: #F5F7FA;
+        --brida-text-muted: #617285;
+        --brida-success: #166534;
+        --brida-warning: #B45309;
+        --brida-error: #B42318;
+    }
     .stApp {
-        background: #F5F7FA;
+        background: var(--brida-gray-bg);
     }
     .ui-icon {
         display: inline-flex;
@@ -5632,11 +6339,18 @@ def render_global_app_styles() -> None:
     .ui-icon svg {
         width: 16px;
         height: 16px;
+        flex-shrink: 0;
+        fill: none;
         stroke: currentColor;
         stroke-width: 1.7;
-        fill: none;
         stroke-linecap: round;
         stroke-linejoin: round;
+        vector-effect: non-scaling-stroke;
+    }
+    .ui-icon svg path {
+        fill: none;
+        stroke: inherit;
+        vector-effect: non-scaling-stroke;
     }
     .with-icon {
         display: inline-flex;
@@ -5652,19 +6366,48 @@ def render_global_app_styles() -> None:
     }
     .ui-section-box {
         background: #FFFFFF;
-        border: 1px solid #E5E7EB;
-        border-radius: 14px;
-        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
-        padding: 18px;
-        margin: 0 0 18px;
+        border: 1px solid var(--brida-border);
+        border-radius: var(--brida-radius);
+        box-shadow: var(--brida-shadow);
+        padding: 14px 16px;
+        margin: 0 0 12px;
     }
     .ui-section-box.is-soft {
         background: #FAFBFC;
     }
     .ui-section-box.is-sidebar {
-        padding: 14px;
-        margin-bottom: 16px;
-        box-shadow: 0 3px 10px rgba(15, 23, 42, 0.035);
+        padding: 11px 12px;
+        margin-bottom: 10px;
+        border-radius: 13px;
+        box-shadow: 0 2px 8px rgba(31, 58, 95, 0.05);
+    }
+    section.main [data-testid="stVerticalBlockBorderWrapper"],
+    [data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
+        background: #FFFFFF;
+        border: 1px solid var(--brida-border) !important;
+        border-radius: var(--brida-radius);
+        box-shadow: var(--brida-shadow);
+        padding: 14px 16px;
+        margin: 0 0 12px;
+    }
+    [data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
+        background: #FAFBFC;
+        padding: 11px 12px;
+        margin-bottom: 10px;
+        border-radius: 13px;
+        box-shadow: 0 2px 8px rgba(31, 58, 95, 0.05);
+    }
+    section.main [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stVerticalBlockBorderWrapper"] {
+        background: #FAFBFC;
+        border-color: #E5E7EB !important;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
+        padding: 12px 14px 4px;
+        margin-bottom: 0;
+    }
+    section.main [data-testid="stVerticalBlockBorderWrapper"] h3 {
+        margin: 0 0 6px;
+        color: #1F3A5F;
+        font-size: 0.98rem;
     }
     .ui-section-box .section-title-block {
         margin-bottom: 12px;
@@ -5674,13 +6417,13 @@ def render_global_app_styles() -> None:
     }
     .erp-card {
         background: #FFFFFF;
-        border: 1px solid #E5E7EB;
-        border-radius: 12px;
-        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+        border: 1px solid var(--brida-border);
+        border-radius: var(--brida-radius);
+        box-shadow: var(--brida-shadow);
         padding: 10px 12px;
         height: auto;
         min-height: 0;
-        margin-bottom: 12px;
+        margin-bottom: 10px;
         color: #405468;
     }
     .erp-card-info {
@@ -5694,24 +6437,24 @@ def render_global_app_styles() -> None:
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        gap: 0.2rem;
+        gap: 0.15rem;
     }
     .erp-kpi-grid {
         display: grid;
         grid-template-columns: repeat(4, 1fr);
-        gap: 16px;
+        gap: 12px;
         width: 100%;
-        margin: 0 0 18px;
+        margin: 0 0 12px;
         align-items: stretch;
     }
     .erp-card-kpi-fixed {
-        height: 120px;
+        height: 90px;
         margin-bottom: 0;
-        padding: 14px 16px;
-        border: 1px solid #E0E0E0;
-        border-radius: 14px;
+        padding: 9px 12px;
+        border: 1px solid var(--brida-border);
+        border-radius: 13px;
         background: #FFFFFF;
-        box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+        box-shadow: var(--brida-shadow);
         display: flex;
         flex-direction: column;
         align-items: stretch;
@@ -5725,8 +6468,8 @@ def render_global_app_styles() -> None:
         flex-direction: column;
         align-items: center;
         justify-content: flex-start;
-        gap: 0.3rem;
-        min-height: 40px;
+        gap: 0.22rem;
+        min-height: 32px;
     }
     .erp-card-header {
         display: flex;
@@ -5738,12 +6481,12 @@ def render_global_app_styles() -> None:
         color: #6B7280;
         font-size: 0.72rem;
         font-weight: 600;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.06em;
         line-height: 1.2;
         text-transform: uppercase;
     }
     .erp-card-value {
-        color: #1F2937;
+        color: var(--brida-navy);
         font-size: 0.96rem;
         font-weight: 600;
         line-height: 1.2;
@@ -5764,35 +6507,44 @@ def render_global_app_styles() -> None:
         justify-content: center;
         margin-bottom: 0;
     }
+    .erp-card-kpi-fixed .erp-kpi-icon .ui-icon {
+        width: 14px;
+        min-width: 14px;
+        height: 14px;
+    }
+    .erp-card-kpi-fixed .erp-kpi-icon .ui-icon svg {
+        width: 14px;
+        height: 14px;
+    }
     .erp-kpi-value {
-        color: #1F2937;
-        font-size: 2rem;
-        line-height: 1.1;
+        color: var(--brida-navy);
+        font-size: 1.8rem;
+        line-height: 1.05;
         font-weight: 700;
         letter-spacing: -0.03em;
         display: flex;
         align-items: center;
         justify-content: center;
         flex: 1 1 auto;
-        min-height: 52px;
+        min-height: 42px;
         overflow: hidden;
         text-overflow: ellipsis;
         font-family: "Segoe UI", Calibri, Arial, sans-serif;
     }
     .erp-kpi-label {
         color: #475467;
-        font-size: 0.82rem;
+        font-size: 0.74rem;
         font-weight: 700;
         letter-spacing: 0.04em;
-        line-height: 1.2;
+        line-height: 1.15;
         text-transform: none;
         font-family: "Segoe UI", Calibri, Arial, sans-serif;
     }
     .erp-kpi-subtitle {
         color: #98A2B3;
-        font-size: 0.74rem;
-        line-height: 1.15;
-        min-height: 14px;
+        font-size: 0.67rem;
+        line-height: 1.1;
+        min-height: 11px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -5801,11 +6553,40 @@ def render_global_app_styles() -> None:
     [data-testid="stDataFrame"] table td {
         vertical-align: middle;
     }
+    [data-testid="stDataFrame"] table thead th,
+    [data-testid="stDataFrame"] table thead td {
+        background: var(--brida-blue-soft) !important;
+        color: var(--brida-navy) !important;
+        font-weight: 600;
+        border-bottom: 1px solid var(--brida-border) !important;
+    }
+    [data-testid="stDataFrame"] table tbody tr:nth-child(even) td {
+        background: #F8FAFC;
+    }
+    [data-testid="stDataFrame"] table tbody tr:hover td {
+        background: #EEF4FF;
+    }
+    [data-testid="stDataFrame"] table {
+        width: 100%;
+    }
     .section-title {
-        margin: 6px 0 10px;
-        color: #1F3A5F;
+        margin: 4px 0 8px;
+        color: var(--brida-navy);
         font-size: 0.95rem;
         font-weight: 700;
+    }
+    .fechamento-balcao-title {
+        margin-bottom: 0.55rem;
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: var(--brida-navy);
+    }
+    .balcao-operacional-caption,
+    .fechamento-operacional-caption {
+        margin: 0 0 0.85rem;
+        color: #617285;
+        font-size: 0.82rem;
+        line-height: 1.35;
     }
     .export-title {
         text-align: right;
@@ -5903,10 +6684,10 @@ def render_global_app_styles() -> None:
     }
     .table-shell {
         background: #FFFFFF;
-        padding: 16px;
-        border-radius: 8px;
-        border: 1px solid rgba(31, 58, 95, 0.08);
-        box-shadow: 0 4px 16px rgba(31, 58, 95, 0.04);
+        padding: 14px 16px;
+        border-radius: var(--brida-radius);
+        border: 1px solid var(--brida-border);
+        box-shadow: var(--brida-shadow);
     }
     .table-shell h3 {
         margin: 0 0 6px;
@@ -5923,11 +6704,11 @@ def render_global_app_styles() -> None:
     }
     .dashboard-hero {
         background: linear-gradient(135deg, #16324F 0%, #25486E 100%);
-        border-radius: 18px;
-        padding: 28px;
+        border-radius: 14px;
+        padding: 22px 24px;
         color: #FFFFFF;
-        box-shadow: 0 16px 30px rgba(22, 50, 79, 0.16);
-        margin-bottom: 1.25rem;
+        box-shadow: 0 10px 22px rgba(22, 50, 79, 0.14);
+        margin-bottom: 1rem;
     }
     .dashboard-hero h1 {
         margin: 0;
@@ -5942,12 +6723,12 @@ def render_global_app_styles() -> None:
     }
     .module-card {
         background: #FFFFFF;
-        border: 1px solid rgba(31, 58, 95, 0.08);
-        border-radius: 18px;
-        padding: 20px;
-        box-shadow: 0 10px 24px rgba(31, 58, 95, 0.06);
-        height: 290px;
-        margin-bottom: 12px;
+        border: 1px solid var(--brida-border);
+        border-radius: 14px;
+        padding: 10px 16px 9px;
+        box-shadow: var(--brida-shadow);
+        height: 170px;
+        margin-bottom: 5px;
         display: flex;
         flex-direction: column;
         justify-content: flex-start;
@@ -5955,12 +6736,12 @@ def render_global_app_styles() -> None:
         overflow: hidden;
     }
     .module-card h3 {
-        margin: 0.7rem 0 0.35rem;
-        color: #16324F;
-        font-size: 1.1rem;
+        margin: 0.35rem 0 0.15rem;
+        color: var(--brida-navy);
+        font-size: 1.05rem;
         font-weight: 800;
         line-height: 1.25;
-        min-height: 56px;
+        min-height: 38px;
         display: -webkit-box;
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
@@ -5968,38 +6749,47 @@ def render_global_app_styles() -> None:
     }
     .module-card p {
         margin: 0;
-        color: #617285;
-        font-size: 0.94rem;
-        line-height: 1.5;
+        color: var(--brida-text-muted);
+        font-size: 0.9rem;
+        line-height: 1.35;
         display: -webkit-box;
-        -webkit-line-clamp: 3;
+        -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
         overflow: hidden;
+        flex: 1 1 auto;
     }
     .module-card-icon {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 44px;
-        height: 44px;
-        border-radius: 14px;
-        background: #EEF4FF;
-        color: #1D4ED8;
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: var(--brida-blue-soft);
+        color: var(--brida-navy);
+        flex-shrink: 0;
     }
     .module-card-icon .ui-icon {
-        width: 22px;
-        min-width: 22px;
-        height: 22px;
+        width: 19px;
+        min-width: 19px;
+        height: 19px;
         color: inherit;
+    }
+    div[data-testid="stMarkdown"]:has(.module-card) {
+        margin-bottom: 0;
+    }
+    div[data-testid="stMarkdown"]:has(.module-card) + div[data-testid="stVerticalBlock"] {
+        margin-top: 0;
+        padding-top: 0;
     }
     .stButton > button,
     .stDownloadButton > button {
         border-radius: 8px;
-        min-height: 40px;
-        border: 1px solid rgba(31, 58, 95, 0.14);
+        min-height: 38px;
+        border: 1px solid var(--brida-border);
         background: #FFFFFF;
-        color: #1F3A5F;
-        font-weight: 700;
+        color: var(--brida-navy);
+        font-weight: 600;
         box-shadow: none;
     }
     .stButton > button:hover,
@@ -6008,27 +6798,27 @@ def render_global_app_styles() -> None:
         color: #1F3A5F;
     }
     .stDownloadButton > button {
-        background: #1F3A5F;
+        background: var(--brida-navy);
         color: #FFFFFF;
         border: 0;
-        min-height: 42px;
+        min-height: 40px;
         padding-left: 1rem;
         padding-right: 1rem;
         font-weight: 500;
     }
     .stDownloadButton > button:hover {
         color: #FFFFFF;
-        background: #25486E;
+        background: var(--brida-navy-hover);
     }
     .stButton > button[kind="primary"],
     .stFormSubmitButton > button[kind="primary"] {
-        background: #B42318;
+        background: var(--brida-navy);
         color: #FFFFFF;
         border: 0;
     }
     .stButton > button[kind="primary"]:hover,
     .stFormSubmitButton > button[kind="primary"]:hover {
-        background: #912018;
+        background: var(--brida-navy-hover);
         color: #FFFFFF;
     }
     .stTextInput > div > div input {
@@ -6036,7 +6826,7 @@ def render_global_app_styles() -> None:
     }
     [data-testid="stSidebar"] {
         background: #FFFFFF;
-        border-right: 1px solid rgba(31, 58, 95, 0.08);
+        border-right: 1px solid var(--brida-border);
     }
     [data-testid="stSidebar"] h2,
     [data-testid="stSidebar"] h3 {
@@ -6047,32 +6837,71 @@ def render_global_app_styles() -> None:
         font-weight: 500;
     }
     [data-testid="stSidebar"] .stFileUploader {
-        padding: 10px;
+        padding: 8px;
         border-radius: 8px;
         background: #F8FAFC;
-        border: 1px solid rgba(31, 58, 95, 0.08);
+        border: 1px solid var(--brida-border);
         box-shadow: none;
     }
     .sidebar-heading {
-        margin: 0 0 10px;
-        color: #1F3A5F;
-        font-size: 1rem;
+        margin: 0 0 6px;
+        color: var(--brida-navy);
+        font-size: 0.92rem;
         font-weight: 700;
     }
     .sidebar-field-label {
-        margin: 0 0 10px;
+        margin: 0 0 8px;
         color: #334155;
-        font-size: 0.95rem;
+        font-size: 0.88rem;
         font-weight: 700;
     }
+    .sidebar-heading .ui-icon,
+    .sidebar-field-label .ui-icon,
+    .erp-card-header .ui-icon {
+        color: var(--brida-navy);
+    }
     [data-testid="stSidebar"] .stButton > button {
-        background: #1F3A5F;
+        background: var(--brida-navy);
         color: #FFFFFF;
         border: 0;
+        min-height: 38px;
+        font-weight: 600;
+    }
+    [data-testid="stSidebar"] .stButton > button[kind="secondary"] {
+        background: #FFFFFF;
+        color: var(--brida-navy);
+        border: 1px solid var(--brida-border);
     }
     [data-testid="stSidebar"] .stButton > button:hover {
         color: #FFFFFF;
-        background: #25486E;
+        background: var(--brida-navy-hover);
+    }
+    [data-testid="stSidebar"] .stButton > button[kind="secondary"]:hover {
+        color: var(--brida-navy);
+        background: var(--brida-blue-soft);
+    }
+    section.main .block-container {
+        padding-top: 0.85rem;
+        padding-bottom: 1rem;
+        max-width: 100%;
+    }
+    section.main [data-testid="stCaptionContainer"] {
+        margin-bottom: 0.25rem;
+    }
+    div[data-testid="stAlert"][data-baseweb="notification"] {
+        border-radius: 8px;
+    }
+    div[data-testid="stNotificationContentSuccess"] {
+        background: #ECFDF3;
+        border-color: rgba(22, 101, 52, 0.2);
+    }
+    div[data-testid="stNotificationContentWarning"] {
+        background: #FFFBEB;
+        border-color: rgba(180, 83, 9, 0.2);
+    }
+    div[data-testid="stNotificationContentError"] {
+        background: #FEF3F2;
+        border-color: rgba(180, 35, 24, 0.2);
     }
     div[data-testid="stAlert"] {
         border-radius: 8px;
@@ -6082,6 +6911,30 @@ def render_global_app_styles() -> None:
     div[data-testid="stAlert"] p {
         font-size: 0.92rem;
         line-height: 1.55;
+    }
+    .brida-users-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+    }
+    .brida-users-table thead th {
+        background: var(--brida-blue-soft);
+        color: var(--brida-navy);
+        font-weight: 600;
+        text-align: left;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--brida-border);
+    }
+    .brida-users-table tbody td {
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(31, 58, 95, 0.06);
+        vertical-align: middle;
+    }
+    .brida-users-table tbody tr:nth-child(even) td {
+        background: #F8FAFC;
+    }
+    .brida-users-table tbody tr:hover td {
+        background: #EEF4FF;
     }
     @media (max-width: 900px) {
         .table-shell {
@@ -6111,14 +6964,18 @@ def load_runtime_reference_data(force_refresh: bool = False) -> tuple[list[dict[
 
     if should_refresh:
         with st.spinner("Atualizando bases de referência..."):
-            xml_records, _ = carregar_xmls_processados_json(str(XMLS_PROCESSADOS_JSON_PATH))
-            classificacao_records, _ = carregar_classificacao_produtos_json(
-                str(CLASSIFICACAO_PRODUTOS_JSON_PATH),
-                get_path_cache_token(CLASSIFICACAO_PRODUTOS_JSON_PATH),
-            )
+            with measure("sql.carregar_xmls"):
+                xml_records, xml_error = carregar_xmls_processados_json(str(XMLS_PROCESSADOS_JSON_PATH))
+            with measure("sql.carregar_classificacao"):
+                classificacao_records, _ = carregar_classificacao_produtos_json(
+                    str(CLASSIFICACAO_PRODUTOS_JSON_PATH),
+                    get_path_cache_token(CLASSIFICACAO_PRODUTOS_JSON_PATH),
+                )
         st.session_state["runtime_xml_records"] = xml_records
         st.session_state["runtime_classificacao_records"] = classificacao_records
         st.session_state["runtime_data_signature"] = runtime_signature
+        st.session_state["runtime_xml_storage_error"] = xml_error
+        invalidate_balcao_lookup_cache()
 
     return (
         st.session_state.get("runtime_xml_records", []),
@@ -6167,11 +7024,6 @@ def render_active_screen(current_screen: str, process_clicked: bool, excel_file)
         tela_minuta(process_clicked, xml_records, excel_file, get_minuta_module_config(current_screen))
         return
 
-    if current_screen == SCREEN_ENTREGA:
-        xml_records, _ = load_runtime_reference_data(force_refresh=force_refresh)
-        tela_entrega(process_clicked, xml_records, excel_file)
-        return
-
     separacao_records, separacao_sync_issues, separacao_storage_error, separacao_import_summary = load_runtime_operational_data(
         force_refresh=force_refresh
     )
@@ -6179,7 +7031,64 @@ def render_active_screen(current_screen: str, process_clicked: bool, excel_file)
         tela_separacao(separacao_records, separacao_sync_issues, separacao_storage_error, separacao_import_summary)
         return
 
+    if current_screen == SCREEN_USUARIOS:
+        if not require_admin():
+            st.session_state["auth_access_error"] = "Acesso restrito ao perfil Administrador."
+            navegar(SCREEN_MENU)
+            return
+        tela_usuarios()
+        return
+
+    if current_screen == SCREEN_CONSULTA_CARREGAMENTOS:
+        tela_consulta_carregamentos()
+        return
+
     tela_lotes(separacao_records)
+
+
+
+def build_menu_cards() -> list[dict[str, object]]:
+    menu_cards: list[dict[str, object]] = [
+        {
+            "target_screen": MINUTA_CARREGAMENTO_CONFIG.screen_key,
+            "nav_key": "minuta",
+            "title": MINUTA_CARREGAMENTO_CONFIG.menu_title,
+            "description": MINUTA_CARREGAMENTO_CONFIG.menu_description,
+            "icon_key": MINUTA_CARREGAMENTO_CONFIG.menu_icon_key,
+            "button_label": "📦 Minuta",
+        },
+        {
+            "target_screen": SCREEN_CONSULTA_CARREGAMENTOS,
+            "nav_key": "consulta_carregamentos",
+            "title": "Consulta de NFs",
+            "description": "Localize NFs e documentos do historico operacional.",
+            "icon_key": "consulta_carregamentos",
+            "button_label": "🔎 Consulta",
+        },
+    ]
+    if is_admin():
+        menu_cards.extend(
+            [
+                {
+                    "target_screen": SCREEN_USUARIOS,
+                    "nav_key": "list",
+                    "title": "Usuarios",
+                    "description": "Gerenciar operadores e acessos.",
+                    "icon_key": "usuarios",
+                    "button_label": "👤 Usuarios",
+                },
+                {
+                    "target_screen": SCREEN_USUARIOS,
+                    "nav_key": "create",
+                    "title": "Cadastro",
+                    "description": "Novo operador ou administrador.",
+                    "icon_key": "cadastro_usuarios",
+                    "button_label": "⚙ Cadastro",
+                    "open_action": "create",
+                },
+            ]
+        )
+    return menu_cards
 
 
 def render_screen_header(title: str, subtitle: str) -> None:
@@ -6192,16 +7101,15 @@ def render_screen_header(title: str, subtitle: str) -> None:
         st.markdown(f"## {title}")
         st.caption(subtitle)
     with col_home:
-        if st.button("🏠 Menu", use_container_width=True, key=f"home_button_{title}"):
+        if st.button("🏠 Painel", use_container_width=True, key=f"home_button_{title}"):
             navegar(SCREEN_MENU)
     with col_menu_toggle:
         st.button("Painel", use_container_width=True, on_click=toggle_menu, key=f"toggle_sidebar_{title}")
     with col_action:
-        st.button("Sair", use_container_width=True, on_click=logout, key=f"logout_{title}")
+        st.button("🚪 Sair", use_container_width=True, on_click=logout, key=f"logout_{title}", type="secondary")
 
 
 def tela_menu() -> None:
-    apply_sidebar_visibility(False)
     top_col_1, top_col_2, top_col_3 = st.columns([1.2, 4.8, 1.0], vertical_alignment="center")
     with top_col_1:
         logo_path = get_logo_path()
@@ -6212,59 +7120,46 @@ def tela_menu() -> None:
             """
         <div class="dashboard-hero">
             <h1>Central Operacional</h1>
-            <p>Selecione um módulo para continuar o fluxo de carregamento, entrega, separação e gestão de lotes.</p>
+            <p>Selecione o modulo para continuar o fluxo de carregamento.</p>
         </div>
         """,
             unsafe_allow_html=True,
         )
     with top_col_3:
-        st.button("Sair", use_container_width=True, on_click=logout, key="logout_menu")
+        st.button("🚪 Sair", use_container_width=True, on_click=logout, key="logout_menu", type="secondary")
 
-    menu_cards = [
-        {
-            "target_screen": MINUTA_CARREGAMENTO_CONFIG.screen_key,
-            "title": MINUTA_CARREGAMENTO_CONFIG.menu_title,
-            "description": MINUTA_CARREGAMENTO_CONFIG.menu_description,
-            "icon_key": MINUTA_CARREGAMENTO_CONFIG.menu_icon_key,
-            "button_label": MINUTA_CARREGAMENTO_CONFIG.menu_button_label,
-        },
-        {
-            "target_screen": MINUTA_ENTREGA_CONFIG.screen_key,
-            "title": MINUTA_ENTREGA_CONFIG.menu_title,
-            "description": MINUTA_ENTREGA_CONFIG.menu_description,
-            "icon_key": MINUTA_ENTREGA_CONFIG.menu_icon_key,
-            "button_label": MINUTA_ENTREGA_CONFIG.menu_button_label,
-        },
-        {
-            "target_screen": SCREEN_SEPARACAO,
-            "title": "Mapa de Separação",
-            "description": "Conferência de picking, leitura de notas e controle operacional da separação.",
-            "icon_key": "separacao",
-            "button_label": "📊 Mapa de Separação",
-        },
-        {
-            "target_screen": SCREEN_LOTES,
-            "title": "Gestão de Lotes de Separação",
-            "description": "Consulta, exportação e controle dos lotes fechados e em andamento.",
-            "icon_key": "lotes",
-            "button_label": "📑 Gestão de Lotes de Separação",
-        },
-    ]
-    row_columns = st.columns(4, gap="medium")
+    auth_access_error = st.session_state.pop("auth_access_error", "")
+    if auth_access_error:
+        st.error(auth_access_error)
+
+    menu_cards = build_menu_cards()
+    row_columns = st.columns(len(menu_cards), gap="medium")
     for column, card in zip(row_columns, menu_cards):
         with column:
+            icon_markup = render_label_icon(resolve_menu_icon(str(card["icon_key"])))
             st.markdown(
                 f"""
             <div class="module-card">
-                <div class="module-card-icon">{render_label_icon(ICON_MAP[card['icon_key']])}</div>
-                <h3>{html.escape(card['title'])}</h3>
-                <p>{html.escape(card['description'])}</p>
+                <div class="module-card-icon">{icon_markup}</div>
+                <h3>{html.escape(str(card['title']))}</h3>
+                <p>{html.escape(str(card['description']))}</p>
             </div>
             """,
                 unsafe_allow_html=True,
             )
-            if st.button(card["button_label"], use_container_width=True, key=f"menu_nav_{card['target_screen']}"):
-                navegar(card["target_screen"])
+            nav_key = str(card.get("nav_key", card["target_screen"]))
+            if st.button(
+                str(card.get("button_label", "Acessar")),
+                use_container_width=True,
+                key=f"menu_nav_{nav_key}",
+            ):
+                if card.get("open_action") == "create":
+                    st.session_state["usuarios_action"] = "create"
+                    st.session_state.pop("usuarios_selected_id", None)
+                else:
+                    st.session_state.pop("usuarios_action", None)
+                    st.session_state.pop("usuarios_selected_id", None)
+                navegar(str(card["target_screen"]))
 
 
 def tela_minuta(
@@ -6275,11 +7170,6 @@ def tela_minuta(
 ) -> None:
     render_screen_header(module_config.header_title, module_config.header_subtitle)
     render_processing_screen(process_clicked, xml_records, excel_file, module_config)
-
-
-def tela_entrega(process_clicked: bool, xml_records: list[dict[str, object]], excel_file) -> None:
-    render_screen_header(MINUTA_ENTREGA_CONFIG.header_title, MINUTA_ENTREGA_CONFIG.header_subtitle)
-    render_delivery_screen(process_clicked, xml_records, excel_file)
 
 
 def tela_separacao(
@@ -6297,33 +7187,64 @@ def tela_lotes(separacao_records: list[dict[str, object]]) -> None:
     render_lotes_management_screen(separacao_records)
 
 
-def render_main_screen() -> None:
-    initialize_app_state()
-    render_global_app_styles()
+def tela_usuarios() -> None:
+    render_usuarios_page(
+        render_header_callback=render_screen_header,
+        navigate_callback=navegar,
+        menu_screen=SCREEN_MENU,
+    )
 
-    login_success = st.session_state.get("login_success", "")
-    if login_success:
-        st.success(login_success)
-        st.session_state["login_success"] = ""
-    current_screen = normalize_screen_name(st.session_state.get("tela", SCREEN_MENU))
-    if current_screen == SCREEN_MENU:
-        tela_menu()
+
+def tela_consulta_carregamentos() -> None:
+    render_consulta_carregamentos_page(render_header_callback=render_screen_header)
+
+
+def render_main_screen() -> None:
+    with measure("ui.render_main_screen"):
+        initialize_app_state()
+        render_global_app_styles()
+
+        login_success = st.session_state.get("login_success", "")
+        if login_success:
+            st.success(login_success)
+            st.session_state["login_success"] = ""
+        current_screen = normalize_screen_name(st.session_state.get("tela", SCREEN_MENU))
+        if current_screen == SCREEN_MENU:
+            tela_menu()
+            _render_performance_report_panel()
+            return
+
+        if "menu_aberto" not in st.session_state:
+            st.session_state["menu_aberto"] = True
+
+        apply_sidebar_visibility(st.session_state["menu_aberto"])
+        excel_file = None
+        process_clicked = False
+        if st.session_state["menu_aberto"]:
+            _, excel_file, process_clicked = render_sidebar()
+
+        with measure("ui.render_active_screen"):
+            render_active_screen(current_screen, process_clicked, excel_file)
+        _render_performance_report_panel()
+
+
+def _render_performance_report_panel() -> None:
+    if not st.session_state.get("_perf_panel_enabled", True):
         return
 
-    if "menu_aberto" not in st.session_state:
-        st.session_state["menu_aberto"] = True
+    report = build_performance_report()
+    if "Nenhuma medição" in report:
+        return
 
-    apply_sidebar_visibility(st.session_state["menu_aberto"])
-    excel_file = None
-    process_clicked = False
-    if st.session_state["menu_aberto"]:
-        _, excel_file, process_clicked = render_sidebar()
-
-    render_active_screen(current_screen, process_clicked, excel_file)
+    with st.expander("Diagnóstico de performance (sessão atual)", expanded=False):
+        st.markdown(report)
 
 
 def main() -> None:
+    _ui_section_stack.clear()
     st.set_page_config(layout="wide")
+    with measure("startup.configure_storage"):
+        configure_application_storage(DATA_DIR)
     initialize_login_state()
     initialize_navigation_state()
 
@@ -6333,9 +7254,10 @@ def main() -> None:
     if "login_success" not in st.session_state:
         st.session_state["login_success"] = ""
 
-    if not st.session_state["logado"]:
+    if not is_logged_in():
         st.session_state["tela"] = SCREEN_LOGIN
-        render_login_screen()
+        with measure("ui.render_login"):
+            render_login_screen()
         return
 
     render_main_screen()
