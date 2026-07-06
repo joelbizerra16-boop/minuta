@@ -69,12 +69,14 @@ from carregamentos.integration import (
     clear_reentrega_pending,
     clear_reimpressao_pending,
     OPERACIONAL_DECISAO_WIDGET_KEY,
+    OPERACIONAL_CONTINUAR_HISTORICO_VALUE,
     confirmar_decisao_operacional_continuacao,
     executar_analise_operacional,
     executar_fechamento_balcao_para_pdf,
     executar_fechamento_veiculo_para_pdf,
     get_operacional_decisao,
     get_operacional_diagnostico,
+    get_diagnostico_efetivo_fechamento,
     is_operacional_analise_confirmada,
     iniciar_entrega_balcao,
     on_baixar_pdf_click,
@@ -83,6 +85,7 @@ from carregamentos.integration import (
     on_processing_panel_secondary_click,
     persistir_pdfs_apos_fechamento,
     render_balcao_nf_preview,
+    requer_confirmacao_explicita_historico,
     resolve_operational_panel_mode,
     snapshot_exportacao_documentos,
     sync_processing_context_for_excel,
@@ -5118,7 +5121,7 @@ def _run_baixar_pdf_pipeline(
             standalone_balcao=True,
         )
     elif can_close:
-        diagnostico = get_operacional_diagnostico()
+        diagnostico = get_diagnostico_efetivo_fechamento()
         if diagnostico is not None:
             if diagnostico.bloqueia_fechamento:
                 st.session_state["carregamento_finalize_error"] = (
@@ -5537,15 +5540,36 @@ def _render_operacional_decisao_radios(diagnostico: DiagnosticoCarregamento) -> 
         _render_conflito_nfs_detail(diagnostico)
 
     st.markdown('<div id="brida-decisao-operacional"></div>', unsafe_allow_html=True)
-    st.markdown("**Como deseja continuar?**")
-    opcoes = [item.value for item in diagnostico.opcoes_decisao]
+
+    confirmacao_explicita = requer_confirmacao_explicita_historico(diagnostico)
+    if confirmacao_explicita:
+        st.markdown("**Foram encontradas ocorrencias operacionais.**")
+        st.markdown(
+            "Algumas Notas Fiscais desta planilha ja possuem historico de utilizacao."
+        )
+        st.markdown("**Deseja realmente continuar o processamento desta carga?**")
+        st.caption("Esta decisao sera registrada na auditoria.")
+        opcoes = [OPERACIONAL_CONTINUAR_HISTORICO_VALUE, DecisaoOperacional.CANCELAR.value]
+
+        def _formatar_confirmacao(value: object) -> str:
+            texto = str(value)
+            if texto == OPERACIONAL_CONTINUAR_HISTORICO_VALUE:
+                return "Sim, desejo continuar."
+            return "Nao, cancelar operacao."
+
+        format_func = _formatar_confirmacao
+    else:
+        st.markdown("**Como deseja continuar?**")
+        opcoes = [item.value for item in diagnostico.opcoes_decisao]
+        format_func = lambda value: DECISAO_OPERACIONAL_LABELS.get(
+            DecisaoOperacional(str(value)),
+            str(value),
+        )
+
     radio_kwargs: dict[str, object] = {
         "label": "Decisao operacional",
         "options": opcoes,
-        "format_func": lambda value: DECISAO_OPERACIONAL_LABELS.get(
-            DecisaoOperacional(str(value)),
-            str(value),
-        ),
+        "format_func": format_func,
         "key": OPERACIONAL_DECISAO_WIDGET_KEY,
         "label_visibility": "collapsed",
         "on_change": on_operacional_decisao_widget_change,
@@ -5735,10 +5759,15 @@ def render_processing_screen(
             validation_message = "Selecione como deseja continuar no painel operacional."
     elif decisao == DecisaoOperacional.CANCELAR:
         validation_message = "Selecione uma acao operacional para continuar ou use Cancelar operacao."
-    elif diagnostico and diagnostico.bloqueia_fechamento and decisao is None:
+    elif (
+        diagnostico
+        and diagnostico.bloqueia_fechamento
+        and decisao is None
+        and diagnostico.cenario == CenarioOperacional.NF_CANCELADA
+    ):
         validation_message = (
             "; ".join(_humanizar_mensagem_operacional(item) for item in diagnostico.mensagens)
-            or "Revise as ocorrencias operacionais antes de continuar."
+            or "Existem NFs canceladas que impedem o processamento."
         )
     elif not carregamento_selected and not entrega_selected and not xml_selected:
         validation_message = "Selecione ao menos um tipo de documento para gerar o download"
@@ -6582,7 +6611,8 @@ def render_global_app_styles() -> None:
         --brida-navy: #1F3A5F;
         --brida-navy-hover: #25486E;
         --brida-blue-soft: #E8F1FF;
-        --brida-border: rgba(31, 58, 95, 0.12);
+        --brida-border: #1F3A5F;
+        --brida-button-border: rgba(31, 58, 95, 0.18);
         --brida-shadow: 0 4px 12px rgba(31, 58, 95, 0.06);
         --brida-radius: 12px;
         --brida-gray-bg: #F5F7FA;
@@ -6590,6 +6620,81 @@ def render_global_app_styles() -> None:
         --brida-success: #166534;
         --brida-warning: #B45309;
         --brida-error: #B42318;
+    }
+    /* Borda institucional global — heranca automatica em todas as telas */
+    section.main div[data-baseweb="input"] > div,
+    section.main div[data-baseweb="textarea"],
+    section.main div[data-baseweb="select"] > div,
+    section.main div[data-baseweb="datepicker"] input,
+    [data-testid="stSidebar"] div[data-baseweb="input"] > div,
+    [data-testid="stSidebar"] div[data-baseweb="textarea"],
+    [data-testid="stSidebar"] div[data-baseweb="select"] > div {
+        border-color: var(--brida-border) !important;
+    }
+    section.main [data-testid="stTextInput"] > div > div,
+    section.main [data-testid="stTextArea"] > div > div,
+    section.main [data-testid="stNumberInput"] > div > div,
+    section.main [data-testid="stDateInput"] > div > div,
+    section.main [data-testid="stTimeInput"] > div > div,
+    section.main [data-testid="stSelectbox"] > div > div,
+    section.main [data-testid="stMultiSelect"] > div > div,
+    [data-testid="stSidebar"] [data-testid="stTextInput"] > div > div,
+    [data-testid="stSidebar"] [data-testid="stTextArea"] > div > div,
+    [data-testid="stSidebar"] [data-testid="stNumberInput"] > div > div,
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] > div > div,
+    [data-testid="stSidebar"] [data-testid="stMultiSelect"] > div > div {
+        border-color: var(--brida-border) !important;
+    }
+    section.main [data-testid="stFileUploader"] section[data-testid="stFileUploadDropzone"],
+    [data-testid="stSidebar"] [data-testid="stFileUploader"] section[data-testid="stFileUploadDropzone"] {
+        border: 1px solid var(--brida-border) !important;
+    }
+    section.main [data-testid="stExpander"] details,
+    [data-testid="stSidebar"] [data-testid="stExpander"] details {
+        border: 1px solid var(--brida-border);
+        border-radius: var(--brida-radius);
+        overflow: hidden;
+    }
+    section.main [data-testid="stTabs"],
+    [data-testid="stSidebar"] [data-testid="stTabs"] {
+        border: 1px solid var(--brida-border);
+        border-radius: var(--brida-radius);
+        padding: 0.25rem 0.5rem 0.65rem;
+    }
+    section.main [data-testid="stTabs"] [data-baseweb="tab-border"],
+    section.main [data-testid="stTabs"] button[data-baseweb="tab"] {
+        border-color: var(--brida-border) !important;
+    }
+    section.main [data-testid="stForm"],
+    [data-testid="stSidebar"] [data-testid="stForm"] {
+        border: 1px solid var(--brida-border);
+        border-radius: var(--brida-radius);
+    }
+    section.main [data-testid="stDataFrame"],
+    section.main [data-testid="stDataFrameResizable"],
+    [data-testid="stSidebar"] [data-testid="stDataFrame"],
+    [data-testid="stSidebar"] [data-testid="stDataFrameResizable"] {
+        border: 1px solid var(--brida-border);
+        border-radius: var(--brida-radius);
+        overflow: hidden;
+    }
+    div[data-testid="stRadio"] > div[role="radiogroup"],
+    div[data-testid="stRadio"] > div {
+        border: 1px solid var(--brida-border);
+        border-radius: var(--brida-radius);
+        padding: 0.45rem 0.7rem;
+    }
+    div[data-testid="stAlert"],
+    div[data-testid="stToast"] {
+        border: 1px solid var(--brida-border) !important;
+    }
+    [data-testid="stDialog"],
+    [data-testid="stModal"],
+    div[role="dialog"][data-baseweb="modal"] {
+        border: 1px solid var(--brida-border) !important;
+    }
+    .nf-historico-resumo-linha {
+        border-bottom: 1px solid var(--brida-border);
     }
     .logged-user-sidebar-name {
         color: var(--brida-navy);
@@ -6673,7 +6778,7 @@ def render_global_app_styles() -> None:
     }
     section.main [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stVerticalBlockBorderWrapper"] {
         background: #FAFBFC;
-        border-color: #E5E7EB !important;
+        border-color: var(--brida-border) !important;
         box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
         padding: 12px 14px 4px;
         margin-bottom: 0;
@@ -6868,7 +6973,7 @@ def render_global_app_styles() -> None:
     }
     .page-hero {
         background: linear-gradient(135deg, #ffffff 0%, #eef4fb 100%);
-        border: 1px solid rgba(31, 58, 95, 0.08);
+        border: 1px solid var(--brida-border);
         border-radius: 16px;
         box-shadow: 0 10px 24px rgba(31, 58, 95, 0.05);
         padding: 18px 20px;
@@ -6890,7 +6995,7 @@ def render_global_app_styles() -> None:
     }
     .scan-shell {
         background: #FAFBFC;
-        border: 1px solid #E5E7EB;
+        border: 1px solid var(--brida-border);
         border-radius: 14px;
         box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
         padding: 14px 14px 2px;
@@ -7060,7 +7165,7 @@ def render_global_app_styles() -> None:
     .stDownloadButton > button {
         border-radius: 8px;
         min-height: 38px;
-        border: 1px solid var(--brida-border);
+        border: 1px solid var(--brida-button-border);
         background: #FFFFFF;
         color: var(--brida-navy);
         font-weight: 600;
@@ -7095,8 +7200,11 @@ def render_global_app_styles() -> None:
         background: var(--brida-navy-hover);
         color: #FFFFFF;
     }
-    .stTextInput > div > div input {
+    .stTextInput > div > div input,
+    .stTextArea > div > div textarea,
+    .stNumberInput > div > div input {
         border-radius: 8px;
+        border-color: var(--brida-border) !important;
     }
     [data-testid="stSidebar"] {
         background: #FFFFFF;
@@ -7144,7 +7252,7 @@ def render_global_app_styles() -> None:
     [data-testid="stSidebar"] .stButton > button[kind="secondary"] {
         background: #FFFFFF;
         color: var(--brida-navy);
-        border: 1px solid var(--brida-border);
+        border: 1px solid var(--brida-button-border);
     }
     [data-testid="stSidebar"] .stButton > button:hover {
         color: #FFFFFF;
@@ -7179,7 +7287,7 @@ def render_global_app_styles() -> None:
     }
     div[data-testid="stAlert"] {
         border-radius: 8px;
-        border: 1px solid rgba(31, 58, 95, 0.08);
+        border: 1px solid var(--brida-border) !important;
         box-shadow: none;
     }
     div[data-testid="stAlert"] p {

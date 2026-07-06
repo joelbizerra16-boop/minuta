@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
 
 import pandas as pd
@@ -14,7 +16,11 @@ from carregamentos.bootstrap import (
 )
 from carregamentos.models.carregamento import NfHistoricoConflito
 from carregamentos.models.fechamento import FechamentoResult
-from carregamentos.models.operacional import DecisaoOperacional, DiagnosticoCarregamento
+from carregamentos.models.operacional import (
+    CenarioOperacional,
+    DecisaoOperacional,
+    DiagnosticoCarregamento,
+)
 from carregamentos.services.nf_validation import localizar_nf_no_lote
 from utils.streamlit_tables import build_table_column_config
 
@@ -44,12 +50,17 @@ DECISAO_OPERACIONAL_LABELS: dict[DecisaoOperacional, str] = {
 
 OPERACIONAL_DECISAO_WIDGET_KEY = "operacional_decisao_widget"
 OPERACIONAL_ANALISE_CONFIRMADA_KEY = "operacional_analise_confirmada"
+OPERACIONAL_CONTINUACAO_AUDITORIA_KEY = "operacional_continuacao_auditoria"
+OPERACIONAL_CONTINUAR_HISTORICO_VALUE = "CONTINUAR_HISTORICO"
+
+_OPERACIONAL_HISTORICO_LOGGER = logging.getLogger("minuta.operacional.historico")
 
 OPERACIONAL_CONTEXT_KEYS = (
     "operacional_diagnostico",
     "operacional_decisao",
     OPERACIONAL_DECISAO_WIDGET_KEY,
     OPERACIONAL_ANALISE_CONFIRMADA_KEY,
+    OPERACIONAL_CONTINUACAO_AUDITORIA_KEY,
     "operacional_excel_nome",
     "carregamento_saved_id",
     "carregamento_fechado",
@@ -111,16 +122,95 @@ def is_operacional_analise_confirmada() -> bool:
     return bool(st.session_state.get(OPERACIONAL_ANALISE_CONFIRMADA_KEY))
 
 
+def inferir_decisao_operacional(diagnostico: DiagnosticoCarregamento) -> DecisaoOperacional:
+    cenario = diagnostico.cenario
+    if cenario == CenarioOperacional.REIMPRESSAO:
+        return DecisaoOperacional.REIMPRIMIR
+    if cenario == CenarioOperacional.COMPLEMENTACAO:
+        return DecisaoOperacional.COMPLEMENTAR
+    if cenario == CenarioOperacional.REENTREGA:
+        return DecisaoOperacional.REENTREGA
+    if cenario == CenarioOperacional.NF_CANCELADA:
+        return DecisaoOperacional.CANCELAR
+    if DecisaoOperacional.REIMPRIMIR in diagnostico.opcoes_decisao:
+        return DecisaoOperacional.REIMPRIMIR
+    if DecisaoOperacional.COMPLEMENTAR in diagnostico.opcoes_decisao:
+        return DecisaoOperacional.COMPLEMENTAR
+    if DecisaoOperacional.REENTREGA in diagnostico.opcoes_decisao:
+        return DecisaoOperacional.REENTREGA
+    if DecisaoOperacional.NOVO in diagnostico.opcoes_decisao:
+        return DecisaoOperacional.NOVO
+    return DecisaoOperacional.NOVO
+
+
+def requer_confirmacao_explicita_historico(diagnostico: DiagnosticoCarregamento) -> bool:
+    return (
+        diagnostico.bloqueia_fechamento
+        and diagnostico.opcoes_decisao == [DecisaoOperacional.CANCELAR]
+        and diagnostico.cenario != CenarioOperacional.NF_CANCELADA
+    )
+
+
+def _registrar_continuacao_historico(diagnostico: DiagnosticoCarregamento) -> None:
+    agora = datetime.now()
+    usuario = get_current_user()
+    nome_usuario = str(usuario.nome if usuario and usuario.nome else "--")
+    summary = st.session_state.get("summary") or {}
+    carregamento_atual = str(summary.get("numero_carga", "") or "--")
+    registro = {
+        "usuario": nome_usuario,
+        "data": agora.strftime("%d/%m/%Y"),
+        "hora": agora.strftime("%H:%M:%S"),
+        "carregamento_atual": carregamento_atual,
+        "quantidade_nfs_historico": int(diagnostico.nfs_existentes),
+        "nfs_reutilizadas": int(diagnostico.nfs_existentes),
+        "nfs_novas": int(diagnostico.nfs_novas),
+        "decisao": (
+            "Operador autorizou manualmente o processamento apos analise do historico operacional."
+        ),
+    }
+    st.session_state[OPERACIONAL_CONTINUACAO_AUDITORIA_KEY] = registro
+    _OPERACIONAL_HISTORICO_LOGGER.info(
+        "%s usuario=%s data=%s hora=%s carregamento=%s nfs_historico=%s nfs_novas=%s",
+        registro["decisao"],
+        nome_usuario,
+        registro["data"],
+        registro["hora"],
+        carregamento_atual,
+        registro["quantidade_nfs_historico"],
+        registro["nfs_novas"],
+    )
+
+
 def confirmar_analise_operacional_continuacao() -> None:
     st.session_state[OPERACIONAL_ANALISE_CONFIRMADA_KEY] = True
     st.session_state.pop("operacional_decisao", None)
     st.session_state.pop(OPERACIONAL_DECISAO_WIDGET_KEY, None)
 
 
+def get_diagnostico_efetivo_fechamento() -> DiagnosticoCarregamento | None:
+    diagnostico = get_operacional_diagnostico()
+    if diagnostico is None:
+        return None
+    if diagnostico.cenario == CenarioOperacional.NF_CANCELADA:
+        return diagnostico
+    decisao = get_operacional_decisao()
+    if decisao is None or decisao == DecisaoOperacional.CANCELAR:
+        return diagnostico
+    if not is_operacional_analise_confirmada():
+        return diagnostico
+    if not diagnostico.bloqueia_fechamento:
+        return diagnostico
+    payload = diagnostico.to_dict()
+    payload["bloqueia_fechamento"] = False
+    return DiagnosticoCarregamento.from_dict(payload)
+
+
 def cancelar_operacao_pendente() -> None:
     st.session_state.pop("operacional_decisao", None)
     st.session_state.pop(OPERACIONAL_DECISAO_WIDGET_KEY, None)
     st.session_state.pop(OPERACIONAL_ANALISE_CONFIRMADA_KEY, None)
+    st.session_state.pop(OPERACIONAL_CONTINUACAO_AUDITORIA_KEY, None)
     st.session_state.pop("pdf_download_payload", None)
     st.session_state.pop("pdf_download_name", None)
     st.session_state.pop("pdf_download_mime", None)
@@ -182,15 +272,31 @@ def get_operacional_decisao() -> DecisaoOperacional | None:
     return decisao
 
 
+def _aplicar_decisao_widget(valor: str) -> DecisaoOperacional | None:
+    if valor == OPERACIONAL_CONTINUAR_HISTORICO_VALUE:
+        diagnostico = get_operacional_diagnostico()
+        if diagnostico is None:
+            st.session_state.pop("operacional_decisao", None)
+            return None
+        decisao = inferir_decisao_operacional(diagnostico)
+        set_operacional_decisao(decisao)
+        _registrar_continuacao_historico(diagnostico)
+        return decisao
+    try:
+        decisao = DecisaoOperacional(str(valor))
+    except ValueError:
+        st.session_state.pop("operacional_decisao", None)
+        return None
+    set_operacional_decisao(decisao)
+    return decisao
+
+
 def on_operacional_decisao_widget_change() -> None:
     valor = st.session_state.get(OPERACIONAL_DECISAO_WIDGET_KEY)
     if not valor:
         st.session_state.pop("operacional_decisao", None)
         return
-    try:
-        set_operacional_decisao(DecisaoOperacional(str(valor)))
-    except ValueError:
-        st.session_state.pop("operacional_decisao", None)
+    _aplicar_decisao_widget(str(valor))
 
 
 def set_operacional_decisao(decisao: DecisaoOperacional) -> None:
@@ -201,12 +307,7 @@ def confirmar_decisao_operacional_continuacao() -> DecisaoOperacional | None:
     valor = st.session_state.get(OPERACIONAL_DECISAO_WIDGET_KEY)
     if not valor:
         return get_operacional_decisao()
-    try:
-        decisao = DecisaoOperacional(str(valor))
-    except ValueError:
-        return get_operacional_decisao()
-    set_operacional_decisao(decisao)
-    return decisao
+    return _aplicar_decisao_widget(str(valor)) or get_operacional_decisao()
 
 
 def snapshot_exportacao_documentos(screen_key: str = "minuta") -> dict[str, bool]:
@@ -403,7 +504,7 @@ def executar_fechamento_veiculo_para_pdf(
     diagnostico: DiagnosticoCarregamento | None = None,
     decisao: DecisaoOperacional | None = None,
 ) -> tuple[FinalizeStatus, FechamentoResult | None]:
-    diagnostico_efetivo = diagnostico or get_operacional_diagnostico()
+    diagnostico_efetivo = diagnostico or get_diagnostico_efetivo_fechamento()
     decisao_efetiva = decisao or get_operacional_decisao()
     if force_reentrega and decisao_efetiva is None:
         decisao_efetiva = DecisaoOperacional.REENTREGA
