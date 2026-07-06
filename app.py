@@ -1,5 +1,10 @@
+import sys
 from contextlib import contextmanager
 from pathlib import Path
+
+_APP_ROOT = Path(__file__).resolve().parent
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
 from datetime import datetime
 from collections import Counter
 from typing import Callable
@@ -46,7 +51,16 @@ from core.performance import (
 )
 from auth.pages.login import render_login_page
 from auth.pages.usuarios import render_usuarios_page
-from auth.security.session import clear_session_on_logout, get_current_user, get_logged_operator_display_name, is_admin, is_logged_in, render_logged_user_badge, require_admin, OPERADOR_NAO_IDENTIFICADO
+from auth.security import session as operador_session
+
+clear_session_on_logout = operador_session.clear_session_on_logout
+get_current_user = operador_session.get_current_user
+get_logged_operator_display_name = operador_session.get_logged_operator_display_name
+is_admin = operador_session.is_admin
+is_logged_in = operador_session.is_logged_in
+render_logged_user_badge = operador_session.render_logged_user_badge
+require_admin = operador_session.require_admin
+OPERADOR_NAO_IDENTIFICADO = operador_session.OPERADOR_NAO_IDENTIFICADO
 from carregamentos.integration import (
     DECISAO_OPERACIONAL_LABELS,
     cancelar_operacao_pendente,
