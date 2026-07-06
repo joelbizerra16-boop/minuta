@@ -24,6 +24,7 @@ class AppSettings:
     database_url: str
     data_root: Path
     pdf_storage_dir: Path
+    xml_storage_dir: Path
     echo_sql: bool
 
 
@@ -37,6 +38,7 @@ def get_settings() -> AppSettings:
 
     data_root = Path(os.getenv("MINUTA_DATA_ROOT", r"C:\MinutaData"))
     pdf_storage_dir = Path(os.getenv("MINUTA_PDF_STORAGE_DIR", str(data_root / "documentos")))
+    xml_storage_dir = Path(os.getenv("MINUTA_XML_STORAGE_DIR", str(data_root / "xml_storage")))
     database_url = str(os.getenv("MINUTA_DATABASE_URL", _default_database_url()) or _default_database_url()).strip()
     echo_sql = str(os.getenv("MINUTA_SQL_ECHO", "0")).strip().lower() in {"1", "true", "yes"}
 
@@ -45,5 +47,6 @@ def get_settings() -> AppSettings:
         database_url=database_url,
         data_root=data_root,
         pdf_storage_dir=pdf_storage_dir,
+        xml_storage_dir=xml_storage_dir,
         echo_sql=echo_sql,
     )

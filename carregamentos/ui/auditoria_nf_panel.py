@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from carregamentos.bootstrap import get_analise_operacional_service
-from carregamentos.integration import get_operacional_diagnostico
+from carregamentos.integration import confirmar_analise_operacional_continuacao, get_operacional_diagnostico
 from carregamentos.models.auditoria_nf import (
     AuditoriaNfLote,
     NfAuditoriaCard,
@@ -186,7 +186,7 @@ def render_auditoria_nf_expander(*, processed_df) -> None:
         st.markdown("</div>", unsafe_allow_html=True)
 
 
-def render_historico_nfs_contexto(processed_df, *, scope: str = "painel") -> bool:
+def render_historico_nfs_contexto(processed_df, *, scope: str = "painel", show_acoes: bool = True) -> bool:
     """Resumo simples e listagem sob demanda para apoio a decisao operacional."""
     if processed_df is None or processed_df.empty:
         return False
@@ -201,7 +201,8 @@ def render_historico_nfs_contexto(processed_df, *, scope: str = "painel") -> boo
 
     st.markdown('<div class="nf-historico-compacto">', unsafe_allow_html=True)
     _render_resumo_simples(diagnostico)
-    _render_acoes_historico(cache_key=cache_key, scope=scope, lista_key=lista_key)
+    if show_acoes:
+        _render_acoes_historico(cache_key=cache_key, scope=scope, lista_key=lista_key)
 
     if st.session_state.get(lista_key):
         with st.spinner("Carregando historico das notas fiscais..."):
@@ -248,6 +249,7 @@ def _render_acoes_historico(*, cache_key: str, scope: str, lista_key: str) -> No
             use_container_width=True,
             type="primary",
         ):
+            confirmar_analise_operacional_continuacao()
             st.session_state.pop(lista_key, None)
             _clear_expanded_rows(cache_key, scope)
             st.session_state[f"auditoria_nf_foco_decisao_{scope}"] = True

@@ -10,6 +10,7 @@ from carregamentos.services.carregamento_service import CarregamentoService
 from carregamentos.services.fechamento_service import FechamentoCarregamentoService
 from carregamentos.services.historico_carregamento_service import HistoricoCarregamentoService
 from carregamentos.services.rastreabilidade_nf_service import RastreabilidadeNfService
+from carregamentos.services.xml_export_service import XmlExportService
 from infrastructure.database import get_pdf_storage_dir
 
 _repository: CarregamentoRepository | None = None
@@ -38,6 +39,11 @@ def get_carregamento_repository() -> CarregamentoRepository:
 @lru_cache(maxsize=1)
 def get_carregamento_service() -> CarregamentoService:
     return CarregamentoService(get_carregamento_repository(), get_pdf_storage_dir())
+
+
+@lru_cache(maxsize=1)
+def get_xml_export_service() -> XmlExportService:
+    return XmlExportService()
 
 
 @lru_cache(maxsize=1)

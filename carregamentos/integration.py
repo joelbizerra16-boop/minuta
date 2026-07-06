@@ -42,9 +42,14 @@ DECISAO_OPERACIONAL_LABELS: dict[DecisaoOperacional, str] = {
     DecisaoOperacional.CANCELAR: "Cancelar operacao",
 }
 
+OPERACIONAL_DECISAO_WIDGET_KEY = "operacional_decisao_widget"
+OPERACIONAL_ANALISE_CONFIRMADA_KEY = "operacional_analise_confirmada"
+
 OPERACIONAL_CONTEXT_KEYS = (
     "operacional_diagnostico",
     "operacional_decisao",
+    OPERACIONAL_DECISAO_WIDGET_KEY,
+    OPERACIONAL_ANALISE_CONFIRMADA_KEY,
     "operacional_excel_nome",
     "carregamento_saved_id",
     "carregamento_fechado",
@@ -102,8 +107,20 @@ def clear_reimpressao_pending() -> None:
     st.session_state.pop("reimpressao_info", None)
 
 
+def is_operacional_analise_confirmada() -> bool:
+    return bool(st.session_state.get(OPERACIONAL_ANALISE_CONFIRMADA_KEY))
+
+
+def confirmar_analise_operacional_continuacao() -> None:
+    st.session_state[OPERACIONAL_ANALISE_CONFIRMADA_KEY] = True
+    st.session_state.pop("operacional_decisao", None)
+    st.session_state.pop(OPERACIONAL_DECISAO_WIDGET_KEY, None)
+
+
 def cancelar_operacao_pendente() -> None:
     st.session_state.pop("operacional_decisao", None)
+    st.session_state.pop(OPERACIONAL_DECISAO_WIDGET_KEY, None)
+    st.session_state.pop(OPERACIONAL_ANALISE_CONFIRMADA_KEY, None)
     st.session_state.pop("pdf_download_payload", None)
     st.session_state.pop("pdf_download_name", None)
     st.session_state.pop("pdf_download_mime", None)
@@ -142,20 +159,71 @@ def get_operacional_diagnostico() -> DiagnosticoCarregamento | None:
 def set_operacional_diagnostico(diagnostico: DiagnosticoCarregamento) -> None:
     st.session_state["operacional_diagnostico"] = diagnostico.to_dict()
     st.session_state.pop("operacional_decisao", None)
+    st.session_state.pop(OPERACIONAL_DECISAO_WIDGET_KEY, None)
+    st.session_state.pop(OPERACIONAL_ANALISE_CONFIRMADA_KEY, None)
 
 
 def get_operacional_decisao() -> DecisaoOperacional | None:
     value = st.session_state.get("operacional_decisao")
-    if not value:
+    if value:
+        try:
+            return DecisaoOperacional(str(value))
+        except ValueError:
+            pass
+
+    widget_value = st.session_state.get(OPERACIONAL_DECISAO_WIDGET_KEY)
+    if not widget_value:
         return None
     try:
-        return DecisaoOperacional(str(value))
+        decisao = DecisaoOperacional(str(widget_value))
     except ValueError:
         return None
+    set_operacional_decisao(decisao)
+    return decisao
+
+
+def on_operacional_decisao_widget_change() -> None:
+    valor = st.session_state.get(OPERACIONAL_DECISAO_WIDGET_KEY)
+    if not valor:
+        st.session_state.pop("operacional_decisao", None)
+        return
+    try:
+        set_operacional_decisao(DecisaoOperacional(str(valor)))
+    except ValueError:
+        st.session_state.pop("operacional_decisao", None)
 
 
 def set_operacional_decisao(decisao: DecisaoOperacional) -> None:
     st.session_state["operacional_decisao"] = decisao.value
+
+
+def confirmar_decisao_operacional_continuacao() -> DecisaoOperacional | None:
+    valor = st.session_state.get(OPERACIONAL_DECISAO_WIDGET_KEY)
+    if not valor:
+        return get_operacional_decisao()
+    try:
+        decisao = DecisaoOperacional(str(valor))
+    except ValueError:
+        return get_operacional_decisao()
+    set_operacional_decisao(decisao)
+    return decisao
+
+
+def snapshot_exportacao_documentos(screen_key: str = "minuta") -> dict[str, bool]:
+    carregamento_key = f"{screen_key}_pdf_carregamento"
+    entrega_key = f"{screen_key}_pdf_entrega"
+    xml_key = f"{screen_key}_pdf_xmls"
+    return {
+        "carregamento_selected": bool(st.session_state.get(carregamento_key, True)),
+        "entrega_selected": bool(st.session_state.get(entrega_key, False)),
+        "xml_selected": bool(st.session_state.get(xml_key, False)),
+    }
+
+
+def clear_pdf_download_state() -> None:
+    st.session_state.pop("pdf_download_payload", None)
+    st.session_state.pop("pdf_download_name", None)
+    st.session_state.pop("pdf_download_mime", None)
 
 
 def executar_analise_operacional(processed_df: pd.DataFrame) -> DiagnosticoCarregamento:
@@ -178,10 +246,10 @@ def resolve_operational_panel_mode(*, has_excel_loaded: bool, processed_df_empty
 
     diagnostico = get_operacional_diagnostico()
     if has_excel_loaded and not processed_df_empty and diagnostico is not None:
-        if diagnostico.bloqueia_fechamento and diagnostico.requer_decisao:
-            return "carregamento_bloqueado"
         if diagnostico.requer_decisao and get_operacional_decisao() is None:
-            return "carregamento_localizado"
+            if not is_operacional_analise_confirmada():
+                return "carregamento_historico"
+            return "carregamento_decisao"
 
     if not has_excel_loaded:
         return "balcao"
@@ -203,6 +271,7 @@ def on_processing_panel_primary_click() -> None:
     if mode == "reentrega":
         queue_processing_action({"type": "reentrega_confirm"})
     elif mode == "reimpressao":
+        clear_pdf_download_state()
         queue_processing_action({"type": "baixar_pdf", "confirmar_reimpressao": True})
     elif mode == "balcao_confirm":
         queue_processing_action({"type": "balcao_confirm"})
@@ -213,8 +282,6 @@ def on_processing_panel_primary_click() -> None:
                 "termo": str(st.session_state.get("entrega_balcao_termo", "") or ""),
             }
         )
-    elif mode == "carregamento_bloqueado":
-        queue_processing_action({"type": "operacional_cancel"})
     elif mode == "fechamento":
         queue_processing_action({"type": "finalizar_carregamento"})
 
@@ -227,12 +294,18 @@ def on_processing_panel_secondary_click() -> None:
         queue_processing_action({"type": "reimpressao_cancel"})
     elif mode == "balcao_confirm":
         queue_processing_action({"type": "balcao_cancel"})
-    elif mode in {"carregamento_localizado", "carregamento_bloqueado"}:
+    elif mode in {"carregamento_historico", "carregamento_decisao"}:
         queue_processing_action({"type": "operacional_cancel"})
 
 
 def on_baixar_pdf_click() -> None:
-    queue_processing_action({"type": "baixar_pdf"})
+    confirmar_decisao_operacional_continuacao()
+    decisao = get_operacional_decisao()
+    action: dict[str, object] = {"type": "baixar_pdf"}
+    if decisao == DecisaoOperacional.REIMPRIMIR:
+        action["confirmar_reimpressao"] = True
+    clear_pdf_download_state()
+    queue_processing_action(action)
 
 
 def render_balcao_nf_preview(lookup_df: pd.DataFrame, termo: str) -> None:

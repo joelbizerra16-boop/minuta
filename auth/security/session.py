@@ -8,6 +8,39 @@ SESSION_LOGGED_IN = "logado"
 SESSION_USER = "auth_user"
 
 
+OPERADOR_NAO_IDENTIFICADO = "Operador não identificado"
+
+
+def get_logged_operator_display_name() -> str:
+    current_user = get_current_user()
+    if current_user is None:
+        return OPERADOR_NAO_IDENTIFICADO
+    nome = str(current_user.nome or "").strip()
+    if nome:
+        return nome
+    usuario = str(current_user.usuario or "").strip()
+    return usuario or OPERADOR_NAO_IDENTIFICADO
+
+
+def render_logged_user_badge() -> None:
+    if not is_logged_in():
+        return
+    import html
+
+    import streamlit as st
+
+    nome = get_logged_operator_display_name()
+    st.markdown(
+        (
+            '<div class="sidebar-heading with-icon">'
+            "<span>👤</span><span>Usuário Logado</span>"
+            "</div>"
+            f'<div class="logged-user-sidebar-name">{html.escape(nome)}</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+
 def create_session(user: UsuarioPublico) -> None:
     st.session_state[SESSION_LOGGED_IN] = True
     st.session_state[SESSION_USER] = user.to_dict()

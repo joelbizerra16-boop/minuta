@@ -3,6 +3,7 @@ from infrastructure.models.cadastros import DestinatarioORM, MotoristaORM, RotaO
 from infrastructure.models.carregamento import CarregamentoORM, ItemCarregamentoORM
 from infrastructure.models.configuracao import ConfiguracaoORM
 from infrastructure.models.documento import DocumentoORM
+from infrastructure.models.documento_xml import DocumentoXmlORM
 from infrastructure.models.evento_auditoria import EventoAuditoriaORM
 from infrastructure.models.historico import HistoricoOperacionalORM
 from infrastructure.models.nota_fiscal import ItemNotaFiscalORM, NotaFiscalORM
@@ -15,6 +16,7 @@ __all__ = [
     "ConfiguracaoORM",
     "DestinatarioORM",
     "DocumentoORM",
+    "DocumentoXmlORM",
     "EventoAuditoriaORM",
     "HistoricoOperacionalORM",
     "ItemCarregamentoORM",

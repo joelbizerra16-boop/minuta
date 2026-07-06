@@ -74,6 +74,8 @@ def generate_minuta_entrega_pdf(
     empresa: str = "BRIDA LUBRIFICANTES LTDA",
     document_title: str = "MINUTA DE ENTREGA",
     subject_label: str = "Carregamento",
+    operador: str = "",
+    impresso_em: str = "",
 ) -> bytes:
     regular_font, bold_font = _register_pdf_fonts()
 
@@ -292,6 +294,19 @@ def generate_minuta_entrega_pdf(
         current_y,
         "DECLARO ESTAR RETIRANDO AS MERCADORIAS REFERENTES AS NOTAS FISCAIS CONSTANTES NESTE DOCUMENTO EM PERFEITO ESTADO.",
     )
+
+    from auth.security.session import OPERADOR_NAO_IDENTIFICADO
+
+    operador_label = str(operador or "").strip() or OPERADOR_NAO_IDENTIFICADO
+    impresso_label = str(impresso_em or "").strip()
+    if not impresso_label:
+        from datetime import datetime
+
+        impresso_label = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    pdf.setFont(regular_font, 8)
+    pdf.setFillColor(text_muted)
+    pdf.drawString(left_margin, bottom_margin + 2, f"Operador: {operador_label}")
+    pdf.drawString(left_margin, bottom_margin - 10, f"Impresso em: {impresso_label}")
 
     pdf.save()
     buffer.seek(0)

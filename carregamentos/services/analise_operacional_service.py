@@ -92,14 +92,21 @@ class AnaliseOperacionalService:
     def __init__(self, repository: CarregamentoRepository) -> None:
         self._repository = repository
         self._indice_cache: IndiceHistoricoCarregamento | None = None
+        self._carregamentos_cache: list[Carregamento] | None = None
         self._auditoria_nf_repo = SqlAuditoriaNfRepository()
 
     def invalidar_cache(self) -> None:
         self._indice_cache = None
+        self._carregamentos_cache = None
+
+    def _obter_carregamentos(self) -> list[Carregamento]:
+        if self._carregamentos_cache is None:
+            self._carregamentos_cache = self._repository.list_all()
+        return self._carregamentos_cache
 
     def _obter_indice(self) -> IndiceHistoricoCarregamento:
         if self._indice_cache is None:
-            self._indice_cache = IndiceHistoricoCarregamento(self._repository.list_all())
+            self._indice_cache = IndiceHistoricoCarregamento(self._obter_carregamentos())
         return self._indice_cache
 
     def analisar_lote_processado(self, processed_df: pd.DataFrame) -> DiagnosticoCarregamento:
@@ -225,7 +232,7 @@ class AnaliseOperacionalService:
         if not nfs_lote:
             return AuditoriaNfLote(data_consulta=self._formatar_data_hora_consulta(datetime.now()))
 
-        carregamentos = self._repository.list_all()
+        carregamentos = self._obter_carregamentos()
         nf_para_carregamentos, carregamento_map, rota_por_nf = self._mapear_nf_carregamentos(
             carregamentos,
             {item.token for item in nfs_lote},

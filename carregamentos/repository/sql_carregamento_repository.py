@@ -33,7 +33,8 @@ class SqlCarregamentoRepository(CarregamentoRepository):
     def list_all(self) -> list[Carregamento]:
         with self._uow() as uow:
             rows = uow.session.scalars(self._base_stmt()).all()
-            return [self._to_domain(uow.session, row) for row in rows]
+            usuarios = self._preload_usuarios(uow.session, rows)
+            return [self._to_domain(uow.session, row, usuarios) for row in rows]
 
     def get_by_id(self, carregamento_id: int) -> Carregamento | None:
         with self._uow() as uow:
@@ -130,12 +131,20 @@ class SqlCarregamentoRepository(CarregamentoRepository):
         session.flush()
 
     def search(self, filtro: CarregamentoFiltro) -> list[Carregamento]:
-        results = self.list_all()
-        if filtro.data_inicial:
-            results = [item for item in results if item.data >= filtro.data_inicial]
-        if filtro.data_final:
-            results = [item for item in results if item.data <= filtro.data_final]
-        return sorted(results, key=lambda item: (item.data, item.hora, item.id), reverse=True)
+        with self._uow() as uow:
+            stmt = self._base_stmt()
+            if filtro.data_inicial:
+                stmt = stmt.where(CarregamentoORM.data >= filtro.data_inicial)
+            if filtro.data_final:
+                stmt = stmt.where(CarregamentoORM.data <= filtro.data_final)
+            stmt = stmt.order_by(
+                CarregamentoORM.data.desc(),
+                CarregamentoORM.hora.desc(),
+                CarregamentoORM.id.desc(),
+            )
+            rows = uow.session.scalars(stmt).all()
+            usuarios = self._preload_usuarios(uow.session, rows)
+            return [self._to_domain(uow.session, row, usuarios) for row in rows]
 
     def _base_stmt(self):
         return (
@@ -147,15 +156,30 @@ class SqlCarregamentoRepository(CarregamentoRepository):
             .order_by(CarregamentoORM.id)
         )
 
-    def _to_domain(self, session: Session, row: CarregamentoORM | None) -> Carregamento:
+    def _to_domain(
+        self,
+        session: Session,
+        row: CarregamentoORM | None,
+        usuarios: dict[int, UsuarioORM] | None = None,
+    ) -> Carregamento:
         if row is None:
             raise ValueError("Carregamento nao encontrado.")
-        usuario = session.get(UsuarioORM, row.usuario_id)
-        usuario_login = usuario.usuario if usuario else "sistema"
-        ultima_usuario = None
-        if row.ultima_impressao_usuario_id:
-            ultima_row = session.get(UsuarioORM, row.ultima_impressao_usuario_id)
-            ultima_usuario = ultima_row.usuario if ultima_row else None
+        if usuarios is not None:
+            usuario_row = usuarios.get(int(row.usuario_id))
+            ultima_row = (
+                usuarios.get(int(row.ultima_impressao_usuario_id))
+                if row.ultima_impressao_usuario_id
+                else None
+            )
+        else:
+            usuario_row = session.get(UsuarioORM, row.usuario_id)
+            ultima_row = (
+                session.get(UsuarioORM, row.ultima_impressao_usuario_id)
+                if row.ultima_impressao_usuario_id
+                else None
+            )
+        usuario_login = usuario_row.usuario if usuario_row else "sistema"
+        ultima_usuario = ultima_row.usuario if ultima_row else None
         return orm_to_domain(
             row,
             list(row.itens),
@@ -163,6 +187,18 @@ class SqlCarregamentoRepository(CarregamentoRepository):
             usuario_login=usuario_login,
             ultima_impressao_usuario=ultima_usuario,
         )
+
+    @staticmethod
+    def _preload_usuarios(session: Session, rows: list[CarregamentoORM]) -> dict[int, UsuarioORM]:
+        usuario_ids: set[int] = set()
+        for row in rows:
+            usuario_ids.add(int(row.usuario_id))
+            if row.ultima_impressao_usuario_id:
+                usuario_ids.add(int(row.ultima_impressao_usuario_id))
+        if not usuario_ids:
+            return {}
+        loaded = session.scalars(select(UsuarioORM).where(UsuarioORM.id.in_(usuario_ids))).all()
+        return {int(usuario.id): usuario for usuario in loaded}
 
     def _resolve_usuario_id(self, session: Session, carregamento: Carregamento) -> int:
         if carregamento.usuario_id:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 
 import pandas as pd
 
-from carregamentos.models.carregamento import NfHistoricoConflito, normalize_chave_nfe, normalize_nf_number
+from carregamentos.models.carregamento import Carregamento, NfHistoricoConflito, normalize_chave_nfe, normalize_nf_number
 from carregamentos.repository.carregamento_repository import CarregamentoRepository
 
 
@@ -56,46 +57,84 @@ def localizar_nf_no_lote(processed_df: pd.DataFrame, termo: str) -> pd.DataFrame
     return processed_df[mascara].copy()
 
 
+def _montar_indice_conflitos(
+    carregamentos: list[Carregamento],
+) -> tuple[dict[str, list[NfHistoricoConflito]], dict[str, list[NfHistoricoConflito]]]:
+    por_chave: dict[str, list[NfHistoricoConflito]] = defaultdict(list)
+    por_nf: dict[str, list[NfHistoricoConflito]] = defaultdict(list)
+
+    for carregamento in carregamentos:
+        for item in carregamento.itens:
+            item_chave = normalize_chave_nfe(item.chave_nfe)
+            item_nf = normalize_nf_number(item.nf)
+            conflito = NfHistoricoConflito(
+                nf=str(item.nf or ""),
+                chave_nfe=item_chave,
+                numero_carregamento=carregamento.numero_carregamento,
+                data=carregamento.data,
+                motorista=carregamento.motorista,
+                placa=carregamento.placa,
+                modalidade=carregamento.modalidade,
+                status=carregamento.status,
+            )
+            if item_chave:
+                por_chave[item_chave].append(conflito)
+            if item_nf:
+                por_nf[item_nf].append(conflito)
+
+    return por_chave, por_nf
+
+
 class NfHistoricoValidator:
     def __init__(self, repository: CarregamentoRepository):
         self._repository = repository
 
     def validar_conflitos_do_lote(self, processed_df: pd.DataFrame) -> list[NfHistoricoConflito]:
+        identidades = extrair_identidades_nf_do_lote(processed_df)
+        if not identidades:
+            return []
+
+        carregamentos = self._repository.list_all()
+        por_chave, por_nf = _montar_indice_conflitos(carregamentos)
+
         conflitos: list[NfHistoricoConflito] = []
         conflitos_vistos: set[str] = set()
 
-        for identidade in extrair_identidades_nf_do_lote(processed_df):
-            for conflito in self._buscar_conflitos(identidade.chave_nfe, identidade.nf):
+        for identidade in identidades:
+            chave_normalizada = normalize_chave_nfe(identidade.chave_nfe)
+            nf_normalizada = normalize_nf_number(identidade.nf)
+            candidatos: list[NfHistoricoConflito] = []
+            if chave_normalizada:
+                candidatos.extend(por_chave.get(chave_normalizada, []))
+            if nf_normalizada:
+                candidatos.extend(por_nf.get(nf_normalizada, []))
+
+            for conflito in candidatos:
                 token = f"{conflito.chave_nfe}:{conflito.nf}:{conflito.numero_carregamento}"
                 if token in conflitos_vistos:
                     continue
                 conflitos_vistos.add(token)
                 conflitos.append(conflito)
+
         return conflitos
 
     def _buscar_conflitos(self, chave_nfe: str, nf: str) -> list[NfHistoricoConflito]:
-        encontrados: list[NfHistoricoConflito] = []
+        """Compatibilidade com chamadas unitárias legadas."""
+        carregamentos = self._repository.list_all()
+        por_chave, por_nf = _montar_indice_conflitos(carregamentos)
         chave_normalizada = normalize_chave_nfe(chave_nfe)
         nf_normalizada = normalize_nf_number(nf)
-
-        for carregamento in self._repository.list_all():
-            for item in carregamento.itens:
-                item_chave = normalize_chave_nfe(item.chave_nfe)
-                item_nf = normalize_nf_number(item.nf)
-                chave_igual = bool(chave_normalizada and item_chave and chave_normalizada == item_chave)
-                nf_igual = bool(nf_normalizada and item_nf and nf_normalizada == item_nf)
-                if not chave_igual and not nf_igual:
-                    continue
-                encontrados.append(
-                    NfHistoricoConflito(
-                        nf=str(item.nf or nf),
-                        chave_nfe=item_chave or chave_normalizada,
-                        numero_carregamento=carregamento.numero_carregamento,
-                        data=carregamento.data,
-                        motorista=carregamento.motorista,
-                        placa=carregamento.placa,
-                        modalidade=carregamento.modalidade,
-                        status=carregamento.status,
-                    )
-                )
-        return encontrados
+        encontrados: list[NfHistoricoConflito] = []
+        if chave_normalizada:
+            encontrados.extend(por_chave.get(chave_normalizada, []))
+        if nf_normalizada:
+            encontrados.extend(por_nf.get(nf_normalizada, []))
+        dedup: list[NfHistoricoConflito] = []
+        vistos: set[str] = set()
+        for conflito in encontrados:
+            token = f"{conflito.chave_nfe}:{conflito.nf}:{conflito.numero_carregamento}"
+            if token in vistos:
+                continue
+            vistos.add(token)
+            dedup.append(conflito)
+        return dedup

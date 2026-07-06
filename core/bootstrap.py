@@ -15,8 +15,9 @@ def configure_application_storage(data_dir: Path) -> None:
     configure_database(
         database_url=settings.database_url,
         echo=settings.echo_sql,
-        data_root=settings.data_root,
+        data_root=data_dir,
         pdf_storage_dir=settings.pdf_storage_dir,
+        xml_storage_dir=data_dir / "xml_storage",
     )
     ensure_full_schema()
     configure_auth_storage(data_dir)

@@ -13,6 +13,8 @@ import textwrap
 import unicodedata
 import zipfile
 import xml.etree.ElementTree as ET
+import logging
+import time
 
 import pandas as pd
 from reportlab.lib import colors
@@ -28,6 +30,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from utils.gerador_minuta import generate_minuta_entrega_pdf
+from utils.document_download_package import build_documentos_download_package
 from utils.minuta_carregamento import (
     MINUTA_CARREGAMENTO_CONFIG,
     MINUTA_MODULES,
@@ -43,7 +46,7 @@ from core.performance import (
 )
 from auth.pages.login import render_login_page
 from auth.pages.usuarios import render_usuarios_page
-from auth.security.session import clear_session_on_logout, is_admin, is_logged_in, require_admin
+from auth.security.session import clear_session_on_logout, get_current_user, get_logged_operator_display_name, is_admin, is_logged_in, render_logged_user_badge, require_admin, OPERADOR_NAO_IDENTIFICADO
 from carregamentos.integration import (
     DECISAO_OPERACIONAL_LABELS,
     cancelar_operacao_pendente,
@@ -51,22 +54,32 @@ from carregamentos.integration import (
     clear_contexto_operacional,
     clear_reentrega_pending,
     clear_reimpressao_pending,
+    OPERACIONAL_DECISAO_WIDGET_KEY,
+    confirmar_decisao_operacional_continuacao,
     executar_analise_operacional,
     executar_fechamento_balcao_para_pdf,
     executar_fechamento_veiculo_para_pdf,
     get_operacional_decisao,
     get_operacional_diagnostico,
+    is_operacional_analise_confirmada,
     iniciar_entrega_balcao,
     on_baixar_pdf_click,
+    on_operacional_decisao_widget_change,
     on_processing_panel_primary_click,
     on_processing_panel_secondary_click,
     persistir_pdfs_apos_fechamento,
     render_balcao_nf_preview,
     resolve_operational_panel_mode,
+    snapshot_exportacao_documentos,
     sync_processing_context_for_excel,
 )
-from carregamentos.models.operacional import DecisaoOperacional
+from carregamentos.models.operacional import CenarioOperacional, DecisaoOperacional, DiagnosticoCarregamento
 from carregamentos.ui.auditoria_nf_panel import render_auditoria_nf_expander, render_historico_nfs_contexto
+from carregamentos.ui.xml_import_summary_panel import (
+    build_xml_import_report,
+    merge_xml_import_reports,
+    render_xml_import_summary_panel,
+)
 from carregamentos.pages.consulta import render_consulta_carregamentos_page
 from carregamentos.services.nf_validation import localizar_nf_no_lote
 from infrastructure.storage.config_storage import (
@@ -77,8 +90,18 @@ from infrastructure.storage.config_storage import (
     SqlJsonConfigStorage,
 )
 from infrastructure.storage.xml_storage import SqlXmlRecordRepository
+from infrastructure.services.documento_xml_service import DocumentoXmlService, XmlDocumentalItem
 
 _CONFIG_STORAGE = SqlJsonConfigStorage()
+_LOGGER = logging.getLogger("minuta.documento_xml")
+_DOCUMENTO_XML_SERVICE: DocumentoXmlService | None = None
+
+
+def _get_documento_xml_service() -> DocumentoXmlService:
+    global _DOCUMENTO_XML_SERVICE
+    if _DOCUMENTO_XML_SERVICE is None:
+        _DOCUMENTO_XML_SERVICE = DocumentoXmlService()
+    return _DOCUMENTO_XML_SERVICE
 
 BASE_DIR = Path(__file__).resolve().parent
 FIXED_LOGO_PATH = BASE_DIR / "baixados.png"
@@ -1358,6 +1381,8 @@ def generate_minuta_pdf(
     motorista: str,
     pdf_title: str = "MINUTA DE CARREGAMENTO",
     subject_label: str = "Carregamento",
+    operador: str = "",
+    impresso_em: str = "",
 ) -> bytes:
     regular_font, bold_font = register_pdf_fonts()
     mono_font = PDF_FONT_MONO
@@ -1663,6 +1688,13 @@ def generate_minuta_pdf(
     pdf.setFont(regular_font, 12)
     pdf.drawCentredString(page_width / 2, signature_y - 18, "Ass. do conferente")
 
+    operador_label = str(operador or "").strip() or OPERADOR_NAO_IDENTIFICADO
+    impresso_label = str(impresso_em or "").strip() or format_datetime_display()
+    pdf.setFont(regular_font, 8)
+    pdf.setFillColor(colors.HexColor("#6a6a6a"))
+    pdf.drawString(left_margin, bottom_margin + 2, f"Operador: {operador_label}")
+    pdf.drawString(left_margin, bottom_margin - 10, f"Impresso em: {impresso_label}")
+
     pdf.save()
     buffer.seek(0)
     return buffer.getvalue()
@@ -1831,7 +1863,11 @@ class StoredXmlUpload:
 
 
 def build_xml_file_key(name: str, file_bytes: bytes) -> str:
-    return f"{name}:{hashlib.sha256(file_bytes).hexdigest()}"
+    return f"{name}:{compute_xml_file_hash(file_bytes)}"
+
+
+def compute_xml_file_hash(file_bytes: bytes) -> str:
+    return hashlib.sha256(file_bytes).hexdigest()
 
 
 def ensure_xml_upload_batch() -> dict[str, dict[str, object]]:
@@ -1854,7 +1890,8 @@ def merge_uploaded_files_into_xml_batch(uploaded_files: list | None) -> tuple[in
             raise ValueError(f"Limite maximo de {MAX_XML_UPLOAD_BATCH} XMLs por lote.")
 
         file_bytes = uploaded_file.getvalue()
-        file_key = build_xml_file_key(uploaded_file.name, file_bytes)
+        file_hash = compute_xml_file_hash(file_bytes)
+        file_key = f"{uploaded_file.name}:{file_hash}"
         if file_key in batch:
             duplicates += 1
             messages.append(f"XML duplicado ignorado: {uploaded_file.name}")
@@ -1863,6 +1900,7 @@ def merge_uploaded_files_into_xml_batch(uploaded_files: list | None) -> tuple[in
         batch[file_key] = {
             "name": uploaded_file.name,
             "data": file_bytes,
+            "hash_sha256": file_hash,
             "imported": False,
         }
         added += 1
@@ -1981,20 +2019,38 @@ def merge_import_summary(existing: dict[str, int], incoming: dict[str, int]) -> 
 
 def import_pending_xml_batch(
     progress_callback: Callable[[int, int], None] | None = None,
-) -> tuple[dict[str, int], list[str], int]:
+) -> tuple[dict[str, int], list[str], list[str], list[dict[str, object]]]:
     batch = ensure_xml_upload_batch()
     pending_keys = [file_key for file_key, item in batch.items() if not item.get("imported")]
     pending_uploads = get_pending_xml_batch_uploads()
     if not pending_uploads:
-        return dict(st.session_state.get("xml_upload_summary", {})), list(st.session_state.get("xml_upload_issues", [])), 0
+        return (
+            dict(st.session_state.get("xml_upload_summary", {})),
+            list(st.session_state.get("xml_upload_issues", [])),
+            [],
+            [],
+        )
 
+    pending_filenames = [str(upload.name) for upload in pending_uploads]
     parsed_records, parse_summary, parse_issues = parse_xml_upload_batch(pending_uploads, progress_callback)
-    summary, issues = persist_xml_records(parsed_records, parse_summary, parse_issues)
+    with measure("import.xml_operacional_persist"):
+        summary, issues = persist_xml_records(parsed_records, parse_summary, parse_issues)
+    with measure("import.xml_documental_persist"):
+        issues.extend(persist_documental_xml_batch_phase(parsed_records, issues, pending_uploads))
     finalize_xml_upload_batch_after_import(pending_keys, parsed_records, issues)
-    return summary, issues, len(pending_uploads)
+    return summary, issues, pending_filenames, parsed_records
 
 
-def apply_xml_batch_import_result(summary: dict[str, int], issues: list[str]) -> None:
+def apply_xml_batch_import_result(
+    summary: dict[str, int],
+    issues: list[str],
+    *,
+    selected_count: int = 0,
+    upload_duplicate_messages: list[str] | None = None,
+    pending_filenames: list[str] | None = None,
+    elapsed_seconds: float = 0.0,
+    parsed_records: list[dict[str, object]] | None = None,
+) -> None:
     merged_summary = merge_import_summary(st.session_state.get("xml_upload_summary", {}), summary)
     merged_issues = list(st.session_state.get("xml_upload_issues", [])) + list(issues)
     st.session_state["runtime_refresh_required"] = True
@@ -2005,8 +2061,50 @@ def apply_xml_batch_import_result(summary: dict[str, int], issues: list[str]) ->
     st.session_state.xml_upload_error = ""
     st.session_state.xml_upload_issues = merged_issues
 
+    nf_to_arquivo = {
+        str(record.get("NF", "")): str(record.get("Arquivo", ""))
+        for record in (parsed_records or [])
+        if record.get("NF") and record.get("Arquivo")
+    }
+    incoming_report = build_xml_import_report(
+        summary=summary,
+        issues=issues,
+        upload_duplicate_messages=upload_duplicate_messages,
+        selected_count=selected_count,
+        pending_filenames=pending_filenames,
+        elapsed_seconds=elapsed_seconds,
+        nf_to_arquivo=nf_to_arquivo,
+    )
+    st.session_state.xml_import_report = merge_xml_import_reports(
+        st.session_state.get("xml_import_report"),
+        incoming_report,
+    )
 
-def run_pending_xml_batch_import() -> None:
+
+def _record_upload_only_xml_import_report(
+    *,
+    selected_count: int,
+    upload_duplicate_messages: list[str],
+) -> None:
+    if not upload_duplicate_messages and selected_count <= 0:
+        return
+    incoming_report = build_xml_import_report(
+        summary={},
+        issues=[],
+        upload_duplicate_messages=upload_duplicate_messages,
+        selected_count=selected_count,
+    )
+    st.session_state.xml_import_report = merge_xml_import_reports(
+        st.session_state.get("xml_import_report"),
+        incoming_report,
+    )
+
+
+def run_pending_xml_batch_import(
+    *,
+    selected_count: int = 0,
+    upload_duplicate_messages: list[str] | None = None,
+) -> None:
     pending_count = len(get_pending_xml_batch_uploads())
     if pending_count <= 0:
         return
@@ -2022,9 +2120,19 @@ def run_pending_xml_batch_import() -> None:
         progress_caption.caption(f"Lendo e validando arquivos: {current} de {total}")
 
     try:
+        started_at = time.perf_counter()
         with measure("import.xml_batch"):
-            summary, issues, _ = import_pending_xml_batch(update_import_progress)
-        apply_xml_batch_import_result(summary, issues)
+            summary, issues, pending_filenames, parsed_records = import_pending_xml_batch(update_import_progress)
+        elapsed_seconds = time.perf_counter() - started_at
+        apply_xml_batch_import_result(
+            summary,
+            issues,
+            selected_count=selected_count,
+            upload_duplicate_messages=upload_duplicate_messages,
+            pending_filenames=pending_filenames,
+            elapsed_seconds=elapsed_seconds,
+            parsed_records=parsed_records,
+        )
     except ValueError as exc:
         st.session_state.xml_upload_message = ""
         st.session_state.xml_upload_error = str(exc)
@@ -2038,11 +2146,18 @@ def handle_xml_upload_selection(uploaded_files: list | None) -> None:
         return
 
     try:
+        selected_count = len(uploaded_files)
         added, _, duplicate_messages = merge_uploaded_files_into_xml_batch(uploaded_files)
-        for message in duplicate_messages:
-            st.warning(message)
         if added > 0:
-            run_pending_xml_batch_import()
+            run_pending_xml_batch_import(
+                selected_count=selected_count,
+                upload_duplicate_messages=duplicate_messages,
+            )
+        elif duplicate_messages:
+            _record_upload_only_xml_import_report(
+                selected_count=selected_count,
+                upload_duplicate_messages=duplicate_messages,
+            )
     except ValueError as exc:
         st.session_state.xml_upload_message = ""
         st.session_state.xml_upload_error = str(exc)
@@ -2075,6 +2190,90 @@ def format_xml_import_summary_message(summary: dict[str, int]) -> str:
         f"{summary.get('duplicados', 0)} duplicados • "
         f"{summary.get('ignorados', 0)} ignorados"
     )
+
+
+def _read_xml_upload_bytes(xml_file) -> bytes:
+    if hasattr(xml_file, "getvalue"):
+        return bytes(xml_file.getvalue())
+    if isinstance(xml_file, (bytes, bytearray)):
+        return bytes(xml_file)
+    return bytes(getattr(xml_file, "data", b"") or b"")
+
+
+def _build_documental_items_for_phase2(
+    parsed_records: list[dict[str, object]],
+    parse_issues: list[str],
+    xml_files: list | None = None,
+) -> list[XmlDocumentalItem]:
+    rejected = extract_rejected_xml_filenames_from_issues(parse_issues, parsed_records)
+    lookup: dict[str, tuple[bytes, str]] = {}
+
+    for item in ensure_xml_upload_batch().values():
+        name = str(item.get("name", "") or "").strip()
+        if not name:
+            continue
+        data = bytes(item.get("data", b"") or b"")
+        if not data:
+            continue
+        file_hash = str(item.get("hash_sha256", "") or "").strip() or compute_xml_file_hash(data)
+        lookup[name] = (data, file_hash)
+
+    for xml_file in xml_files or []:
+        name = str(getattr(xml_file, "name", "arquivo.xml") or "arquivo.xml").strip()
+        if name in lookup:
+            continue
+        data = _read_xml_upload_bytes(xml_file)
+        if not data:
+            continue
+        lookup[name] = (data, compute_xml_file_hash(data))
+
+    items: list[XmlDocumentalItem] = []
+    seen_chaves: set[str] = set()
+    for record in parsed_records:
+        arquivo = str(record.get("Arquivo", "") or "").strip()
+        if not arquivo or arquivo in rejected:
+            continue
+        chave = normalize_chave_nfe(record.get("ChaveNFe", ""))
+        if not chave or chave in seen_chaves:
+            continue
+        seen_chaves.add(chave)
+        data, file_hash = lookup.get(arquivo, (b"", ""))
+        if not data:
+            continue
+        items.append(
+            XmlDocumentalItem(
+                file_bytes=data,
+                hash_sha256=file_hash,
+                original_filename=arquivo,
+                chave_nfe=chave,
+            )
+        )
+    return items
+
+
+def persist_documental_xml_batch_phase(
+    parsed_records: list[dict[str, object]],
+    parse_issues: list[str],
+    xml_files: list | None = None,
+) -> list[str]:
+    try:
+        items = _build_documental_items_for_phase2(parsed_records, parse_issues, xml_files)
+        if not items:
+            return []
+        user = get_current_user()
+        usuario_id = int(user.id) if user and user.id else None
+        result = _get_documento_xml_service().persist_raw_xml_batch(items, usuario_id=usuario_id)
+        _LOGGER.info(
+            "Fase documental XML concluida em %.1f ms (saved=%s reused=%s skipped=%s)",
+            result.elapsed_ms,
+            result.saved,
+            result.reused,
+            result.skipped,
+        )
+        return list(result.issues)
+    except Exception as exc:
+        _LOGGER.warning("Falha na fase documental XML: %s", exc, exc_info=True)
+        return [f"Persistencia documental dos XMLs nao concluida: {exc}"]
 
 
 def parse_xml_upload_batch(
@@ -2135,15 +2334,7 @@ def persist_xml_records(
     parse_issues: list[str],
 ) -> tuple[dict[str, int], list[str]]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    existing_records, _ = carregar_xmls_processados_json(str(XMLS_PROCESSADOS_JSON_PATH))
-    existing_separacao_records, _ = carregar_separacao_json(str(SEPARACAO_JSON_PATH))
-    locked_separacao_groups = group_separacao_records_by_identity(existing_separacao_records)
-    locked_identities = {
-        identity
-        for identity, records in locked_separacao_groups.items()
-        if is_separacao_group_locked(records)
-    }
-    storage_lookup: dict[str, dict[str, object]] = {}
+    existing_records, load_error = carregar_xmls_processados_json(str(XMLS_PROCESSADOS_JSON_PATH))
     issues = list(parse_issues)
     summary = {
         "total_arquivos": int(parse_summary.get("total_arquivos", 0)),
@@ -2157,6 +2348,19 @@ def persist_xml_records(
         "processados": 0,
         "ignorados": 0,
     }
+    if load_error:
+        issues.append(f"Importacao de XMLs abortada: {load_error}")
+        summary["ignorados"] = summary["total_arquivos"]
+        return summary, issues
+
+    existing_separacao_records, _ = carregar_separacao_json(str(SEPARACAO_JSON_PATH))
+    locked_separacao_groups = group_separacao_records_by_identity(existing_separacao_records)
+    locked_identities = {
+        identity
+        for identity, records in locked_separacao_groups.items()
+        if is_separacao_group_locked(records)
+    }
+    storage_lookup: dict[str, dict[str, object]] = {}
 
     for existing_record in existing_records:
         normalized_record = serialize_xml_record(existing_record)
@@ -2207,7 +2411,9 @@ def import_xml_upload_batch(
         raise ValueError(f"Limite maximo de {MAX_XML_UPLOAD_BATCH} XMLs por operacao.")
 
     parsed_records, parse_summary, parse_issues = parse_xml_upload_batch(xml_files, progress_callback)
-    return persist_xml_records(parsed_records, parse_summary, parse_issues)
+    summary, issues = persist_xml_records(parsed_records, parse_summary, parse_issues)
+    issues.extend(persist_documental_xml_batch_phase(parsed_records, issues, xml_files))
+    return summary, issues
 
 
 def salvar_xmls_processados_records(xml_files: list) -> tuple[dict[str, int], list[str]]:
@@ -4705,6 +4911,10 @@ def _render_minuta_upload_content(xml_records: list) -> tuple[list, object, bool
             unsafe_allow_html=True,
         )
 
+    if is_logged_in():
+        with ui_section_box("is-sidebar is-soft"):
+            render_logged_user_badge()
+
     with ui_section_box("is-sidebar"):
         st.markdown(
             f'''
@@ -4738,34 +4948,14 @@ def _render_minuta_upload_content(xml_records: list) -> tuple[list, object, bool
                 if added_files:
                     handle_xml_upload_selection(added_files)
 
-        has_xml_storage, xml_updated_at = get_xml_storage_status()
-        if st.session_state.xml_upload_message:
-            st.success(st.session_state.xml_upload_message)
-            import_summary = st.session_state.get("xml_upload_summary", {})
-            if import_summary:
-                st.caption(
-                    "Novas: "
-                    f"{import_summary.get('novas', 0)} • "
-                    "Atualizadas: "
-                    f"{import_summary.get('atualizadas', 0)} • "
-                    "Erros: "
-                    f"{import_summary.get('erros', 0)} • "
-                    "Duplicados: "
-                    f"{import_summary.get('duplicados', 0)} • "
-                    "Ignorados: "
-                    f"{import_summary.get('ignorados', 0)}"
-                )
-        if st.session_state.get("xml_upload_error"):
-            st.error(st.session_state.xml_upload_error)
+        render_xml_import_summary_panel(
+            st.session_state.get("xml_import_report"),
+            error_message=str(st.session_state.get("xml_upload_error", "") or ""),
+        )
 
         has_xml_storage, xml_updated_at = get_xml_storage_status()
         if has_xml_storage:
             st.caption(f"Dados carregados do sistema • Ultima atualizacao: {xml_updated_at}")
-
-        if st.session_state.get("xml_upload_issues"):
-            with st.expander("Detalhes dos XMLs", expanded=False):
-                for issue in st.session_state.xml_upload_issues:
-                    st.warning(issue)
 
     current_screen = normalize_screen_name(st.session_state.get("tela", SCREEN_MENU))
     if current_screen != SCREEN_MINUTA:
@@ -4819,6 +5009,8 @@ def build_processing_pdf_bytes(
 ) -> tuple[bytes | None, bytes | None]:
     carregamento_pdf_bytes = b""
     entrega_pdf_bytes = b""
+    operador = get_logged_operator_display_name()
+    impresso_em = format_datetime_display()
     if gerar_minuta:
         minuta_records = build_minuta_records(processed_df)
         if minuta_records:
@@ -4831,6 +5023,8 @@ def build_processing_pdf_bytes(
                     motorista=str(summary.get("motorista", "--") or "--"),
                     pdf_title=module_config.pdf_title,
                     subject_label=module_config.subject_label,
+                    operador=operador,
+                    impresso_em=impresso_em,
                 )
     if gerar_romaneio:
         entrega_records, _, entrega_totals = build_minuta_entrega_records(processed_df)
@@ -4846,6 +5040,8 @@ def build_processing_pdf_bytes(
                     veiculo=str(summary.get("placa", "--") or "--"),
                     motorista=str(summary.get("motorista", "--") or "--"),
                     placa=str(summary.get("placa", "--") or "--"),
+                    operador=operador,
+                    impresso_em=impresso_em,
                 )
     return (
         carregamento_pdf_bytes or None,
@@ -4860,60 +5056,17 @@ def build_pdf_download_package(
     carregamento_selected: bool,
     entrega_selected: bool,
     numero_carga: str,
+    xml_selected: bool = False,
+    xml_entries: list[tuple[str, bytes]] | None = None,
 ) -> tuple[bytes, str, str, str]:
-    if not carregamento_selected and not entrega_selected:
-        return b"", "", "application/pdf", "Selecione ao menos um tipo de minuta para gerar o PDF"
-    if carregamento_selected and not entrega_selected:
-        if not carregamento_pdf_bytes:
-            return b"", "", "application/pdf", "Nao ha dados disponiveis para gerar a minuta de carregamento."
-        return (
-            carregamento_pdf_bytes,
-            f"minuta_carregamento_{sanitize_filename_part(numero_carga, 'brida')}.pdf",
-            "application/pdf",
-            "",
-        )
-    if entrega_selected and not carregamento_selected:
-        if not entrega_pdf_bytes:
-            return b"", "", "application/pdf", "Nao ha dados validos disponiveis para gerar o romaneio de entrega."
-        return (
-            entrega_pdf_bytes,
-            f"minuta_entrega_{sanitize_filename_part(numero_carga, 'brida')}.pdf",
-            "application/pdf",
-            "",
-        )
-
-    has_carregamento = bool(carregamento_pdf_bytes)
-    has_entrega = bool(entrega_pdf_bytes)
-    if has_carregamento and has_entrega:
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("minuta_carregamento.pdf", carregamento_pdf_bytes)
-            archive.writestr("minuta_entrega.pdf", entrega_pdf_bytes)
-        return (
-            zip_buffer.getvalue(),
-            f"minutas_{sanitize_filename_part(numero_carga, 'brida')}.zip",
-            "application/zip",
-            "",
-        )
-    if has_carregamento:
-        return (
-            carregamento_pdf_bytes,
-            f"minuta_carregamento_{sanitize_filename_part(numero_carga, 'brida')}.pdf",
-            "application/pdf",
-            "Nao foi possivel gerar o romaneio de entrega. A minuta de carregamento esta disponivel para download.",
-        )
-    if has_entrega:
-        return (
-            entrega_pdf_bytes,
-            f"minuta_entrega_{sanitize_filename_part(numero_carga, 'brida')}.pdf",
-            "application/pdf",
-            "Nao foi possivel gerar a minuta de carregamento. O romaneio de entrega esta disponivel para download.",
-        )
-    return (
-        b"",
-        "",
-        "application/pdf",
-        "Nao foi possivel gerar a minuta de carregamento e o romaneio de entrega.",
+    return build_documentos_download_package(
+        carregamento_pdf_bytes=carregamento_pdf_bytes,
+        entrega_pdf_bytes=entrega_pdf_bytes,
+        carregamento_selected=carregamento_selected,
+        entrega_selected=entrega_selected,
+        xml_selected=xml_selected,
+        xml_entries=xml_entries,
+        numero_carga=numero_carga,
     )
 
 
@@ -4927,18 +5080,25 @@ def _run_baixar_pdf_pipeline(
     has_excel_loaded: bool,
     carregamento_selected: bool,
     entrega_selected: bool,
+    xml_selected: bool = False,
     confirmar_reimpressao: bool = False,
     force_reentrega: bool = False,
     balcao_termo: str = "",
 ) -> None:
     can_close = has_excel_loaded and not processed_df.empty
+    decisao = confirmar_decisao_operacional_continuacao()
+    if decisao == DecisaoOperacional.REIMPRIMIR:
+        confirmar_reimpressao = True
+    somente_xml = xml_selected and not carregamento_selected and not entrega_selected
+    gerar_minuta_fechamento = carregamento_selected or somente_xml
+    gerar_romaneio_fechamento = entrega_selected
     if balcao_termo:
         finalize_status, fechamento_result = executar_fechamento_balcao_para_pdf(
             termo_busca=balcao_termo,
             summary=balcao_summary,
             lookup_df=balcao_lookup_df,
-            gerar_minuta=carregamento_selected,
-            gerar_romaneio=entrega_selected,
+            gerar_minuta=gerar_minuta_fechamento,
+            gerar_romaneio=gerar_romaneio_fechamento,
             force_reentrega=force_reentrega,
             confirmar_reimpressao=confirmar_reimpressao,
             standalone_balcao=True,
@@ -4951,7 +5111,7 @@ def _run_baixar_pdf_pipeline(
                     "; ".join(diagnostico.mensagens) or "Operacao bloqueada pela analise operacional."
                 )
                 return
-            if diagnostico.requer_decisao and get_operacional_decisao() is None:
+            if diagnostico.requer_decisao and decisao is None:
                 st.session_state["carregamento_finalize_error"] = (
                     "Selecione como deseja continuar no painel operacional antes de gerar os documentos."
                 )
@@ -4959,12 +5119,12 @@ def _run_baixar_pdf_pipeline(
         finalize_status, fechamento_result = executar_fechamento_veiculo_para_pdf(
             summary=summary,
             processed_df=processed_df,
-            gerar_minuta=carregamento_selected,
-            gerar_romaneio=entrega_selected,
+            gerar_minuta=gerar_minuta_fechamento,
+            gerar_romaneio=gerar_romaneio_fechamento,
             force_reentrega=force_reentrega,
             confirmar_reimpressao=confirmar_reimpressao,
             diagnostico=diagnostico,
-            decisao=get_operacional_decisao(),
+            decisao=decisao,
         )
     else:
         st.session_state["carregamento_finalize_error"] = (
@@ -4972,7 +5132,12 @@ def _run_baixar_pdf_pipeline(
         )
         return
 
-    if finalize_status in {"needs_reentrega", "balcao_needs_reentrega", "needs_reimpressao_confirm"}:
+    if finalize_status in {"needs_reentrega", "balcao_needs_reentrega"}:
+        return
+    if finalize_status == "needs_reimpressao_confirm":
+        st.session_state["carregamento_finalize_error"] = (
+            "Confirme a reimpressao no painel operacional antes de gerar os documentos."
+        )
         return
 
     if finalize_status in {"saved", "reimpressao", "complementacao", "balcao_saved"} and fechamento_result and fechamento_result.carregamento:
@@ -4995,11 +5160,21 @@ def _run_baixar_pdf_pipeline(
             minuta_pdf=carregamento_pdf_bytes,
             romaneio_pdf=entrega_pdf_bytes,
         )
+        xml_entries: list[tuple[str, bytes]] = []
+        if xml_selected:
+            from carregamentos.bootstrap import get_xml_export_service
+
+            export_result = get_xml_export_service().collect_xmls_for_carregamento(
+                int(fechamento_result.carregamento.id)
+            )
+            xml_entries = [(entry.nome_arquivo, entry.conteudo) for entry in export_result.entries]
         download_payload, download_name, download_mime, validation_message = build_pdf_download_package(
             carregamento_pdf_bytes=carregamento_pdf_bytes,
             entrega_pdf_bytes=entrega_pdf_bytes,
             carregamento_selected=carregamento_selected,
             entrega_selected=entrega_selected,
+            xml_selected=xml_selected,
+            xml_entries=xml_entries,
             numero_carga=numero_documento,
         )
         if download_payload:
@@ -5037,6 +5212,7 @@ def _process_processing_screen_actions(
     has_excel_loaded: bool,
     carregamento_selected: bool,
     entrega_selected: bool,
+    xml_selected: bool,
 ) -> tuple[str | None, str | None, str | None]:
     finalize_message = str(st.session_state.pop("carregamento_finalize_message", "") or "")
     finalize_error = str(st.session_state.pop("carregamento_finalize_error", "") or "")
@@ -5096,6 +5272,7 @@ def _process_processing_screen_actions(
                 has_excel_loaded=has_excel_loaded,
                 carregamento_selected=carregamento_selected,
                 entrega_selected=entrega_selected,
+                xml_selected=xml_selected,
                 force_reentrega=True,
             )
             finalize_message = str(st.session_state.pop("carregamento_finalize_message", "") or "") or finalize_message
@@ -5115,6 +5292,7 @@ def _process_processing_screen_actions(
             has_excel_loaded=has_excel_loaded,
             carregamento_selected=carregamento_selected,
             entrega_selected=entrega_selected,
+            xml_selected=xml_selected,
             force_reentrega=force_reentrega,
             balcao_termo=balcao_termo,
         )
@@ -5124,6 +5302,7 @@ def _process_processing_screen_actions(
     elif action_type == "baixar_pdf":
         if action.get("confirmar_reimpressao"):
             clear_reimpressao_pending()
+        exportacao = snapshot_exportacao_documentos(module_config.screen_key)
         _run_baixar_pdf_pipeline(
             summary=summary,
             processed_df=processed_df,
@@ -5131,8 +5310,9 @@ def _process_processing_screen_actions(
             balcao_summary=balcao_summary,
             module_config=module_config,
             has_excel_loaded=has_excel_loaded,
-            carregamento_selected=carregamento_selected,
-            entrega_selected=entrega_selected,
+            carregamento_selected=exportacao["carregamento_selected"],
+            entrega_selected=exportacao["entrega_selected"],
+            xml_selected=exportacao["xml_selected"],
             confirmar_reimpressao=bool(action.get("confirmar_reimpressao", False)),
             force_reentrega=bool(action.get("force_reentrega", False)),
             balcao_termo=str(action.get("balcao_termo", "") or ""),
@@ -5209,10 +5389,10 @@ def _build_operational_panel_copy(mode: str) -> tuple[str, str, str]:
             "",
             "",
         )
-    if mode == "carregamento_localizado":
+    if mode == "carregamento_historico":
         return ("Ocorrencias anteriores encontradas", "", "")
-    if mode == "carregamento_bloqueado":
-        return ("Ocorrencias anteriores encontradas", "", "")
+    if mode == "carregamento_decisao":
+        return ("Decisao operacional", "", "")
     if mode == "fechamento":
         return (
             "Fechamento operacional",
@@ -5228,8 +5408,8 @@ def _operational_panel_button_labels(mode: str) -> tuple[str, str, bool, bool]:
         "reimpressao": ("Reimprimir", "Cancelar", False, False),
         "balcao_confirm": ("Confirmar", "Cancelar", False, False),
         "balcao": ("Registrar Entrega no Balcao", "—", False, True),
-        "carregamento_localizado": ("—", "Cancelar operacao", True, False),
-        "carregamento_bloqueado": ("—", "Cancelar operacao", True, False),
+        "carregamento_historico": ("—", "Cancelar operacao", True, False),
+        "carregamento_decisao": ("—", "Cancelar operacao", True, False),
         "fechamento": ("Finalizar Carregamento", "—", False, True),
         "idle": ("—", "—", True, True),
     }
@@ -5241,12 +5421,12 @@ _OPERATIONAL_ATTENTION_MODES = frozenset(
         "reentrega",
         "reimpressao",
         "balcao_confirm",
-        "carregamento_bloqueado",
-        "carregamento_localizado",
+        "carregamento_historico",
+        "carregamento_decisao",
     }
 )
 
-_HISTORICO_PANEL_MODES = frozenset({"carregamento_localizado", "carregamento_bloqueado"})
+_HISTORICO_PANEL_MODES = frozenset({"carregamento_historico", "carregamento_decisao"})
 
 
 def _requires_operational_attention(mode: str) -> bool:
@@ -5299,19 +5479,82 @@ def _scroll_to_decisao_operacional() -> None:
     )
 
 
+def _render_conflito_nfs_detail(diagnostico: DiagnosticoCarregamento) -> None:
+    grupos: dict[int, dict[str, object]] = {}
+    for nf_resumo in diagnostico.nfs:
+        vinculo = nf_resumo.vinculo
+        if vinculo is None:
+            continue
+        grupo = grupos.setdefault(
+            int(vinculo.carregamento_id),
+            {
+                "numero_carregamento": str(vinculo.numero_carregamento or "--"),
+                "nfs": [],
+            },
+        )
+        nfs = grupo["nfs"]
+        assert isinstance(nfs, list)
+        nfs.append(str(nf_resumo.nf or "--"))
+
+    if len(grupos) <= 1:
+        return
+
+    st.warning("Conflito operacional: as NFs abaixo pertencem a carregamentos diferentes.")
+    for carregamento_id, grupo in sorted(grupos.items()):
+        nfs = grupo["nfs"]
+        numero = grupo["numero_carregamento"]
+        nfs_text = ", ".join(nfs) if isinstance(nfs, list) else str(nfs)
+        st.markdown(
+            f"- **Carregamento {numero}** (ID {carregamento_id}): {html.escape(nfs_text)}"
+        )
+
+
+def _render_operacional_decisao_radios(diagnostico: DiagnosticoCarregamento) -> None:
+    if not diagnostico.opcoes_decisao:
+        return
+
+    for mensagem in diagnostico.mensagens:
+        if diagnostico.bloqueia_fechamento:
+            st.warning(_humanizar_mensagem_operacional(mensagem))
+        else:
+            st.info(_humanizar_mensagem_operacional(mensagem))
+
+    if diagnostico.cenario == CenarioOperacional.CONFLITO_MULTIPLO:
+        _render_conflito_nfs_detail(diagnostico)
+
+    st.markdown('<div id="brida-decisao-operacional"></div>', unsafe_allow_html=True)
+    st.markdown("**Como deseja continuar?**")
+    opcoes = [item.value for item in diagnostico.opcoes_decisao]
+    radio_kwargs: dict[str, object] = {
+        "label": "Decisao operacional",
+        "options": opcoes,
+        "format_func": lambda value: DECISAO_OPERACIONAL_LABELS.get(
+            DecisaoOperacional(str(value)),
+            str(value),
+        ),
+        "key": OPERACIONAL_DECISAO_WIDGET_KEY,
+        "label_visibility": "collapsed",
+        "on_change": on_operacional_decisao_widget_change,
+    }
+    if OPERACIONAL_DECISAO_WIDGET_KEY not in st.session_state:
+        radio_kwargs["index"] = None
+    st.radio(**radio_kwargs)
+
+
 def _render_operational_panel(mode: str, saved_id: object, processed_df=None) -> None:
     st.session_state["_operational_panel_mode"] = mode
     title, warning_text, detail_markdown = _build_operational_panel_copy(mode)
     primary_label, secondary_label, primary_disabled, secondary_disabled = _operational_panel_button_labels(mode)
-    historico_modes = {"carregamento_localizado", "carregamento_bloqueado"}
+    historico_phase_modes = {"carregamento_historico"}
+    decisao_phase_modes = {"carregamento_decisao"}
 
     st.markdown('<div id="brida-painel-operacional"></div>', unsafe_allow_html=True)
     with st.container(border=True):
         st.markdown(f'<div class="section-title">{html.escape(title)}</div>', unsafe_allow_html=True)
-        if mode not in historico_modes and warning_text:
+        if mode not in historico_phase_modes and mode not in decisao_phase_modes and warning_text:
             st.warning(warning_text)
 
-        if detail_markdown and mode not in historico_modes:
+        if detail_markdown and mode not in historico_phase_modes and mode not in decisao_phase_modes:
             st.markdown(detail_markdown)
         elif mode == "fechamento":
             st.markdown(
@@ -5321,27 +5564,21 @@ def _render_operational_panel(mode: str, saved_id: object, processed_df=None) ->
                 unsafe_allow_html=True,
             )
 
-        if mode in historico_modes and processed_df is not None:
-            render_historico_nfs_contexto(processed_df, scope="painel")
+        if mode in historico_phase_modes and processed_df is not None:
+            render_historico_nfs_contexto(processed_df, scope="painel", show_acoes=True)
 
-        if mode in historico_modes:
+        if mode in decisao_phase_modes:
             if st.session_state.pop("auditoria_nf_foco_decisao_painel", False):
                 _scroll_to_decisao_operacional()
             diagnostico = get_operacional_diagnostico()
-            if diagnostico and diagnostico.opcoes_decisao:
-                st.markdown('<div id="brida-decisao-operacional"></div>', unsafe_allow_html=True)
-                st.markdown("**Como deseja continuar?**")
-                opcoes = [item.value for item in diagnostico.opcoes_decisao]
-                st.radio(
-                    "Decisao operacional",
-                    options=opcoes,
-                    format_func=lambda value: DECISAO_OPERACIONAL_LABELS.get(
-                        DecisaoOperacional(str(value)),
-                        str(value),
-                    ),
-                    key="operacional_decisao",
-                    label_visibility="collapsed",
-                )
+            if diagnostico is not None:
+                if processed_df is not None:
+                    render_historico_nfs_contexto(
+                        processed_df,
+                        scope="painel_decisao",
+                        show_acoes=False,
+                    )
+                _render_operacional_decisao_radios(diagnostico)
 
         st.text_input(
             "Entrega no Balcao",
@@ -5382,6 +5619,7 @@ def _render_processing_export_panel(
     module_config: MinutaModuleConfig,
     carregamento_checkbox_key: str,
     entrega_checkbox_key: str,
+    xml_checkbox_key: str,
     validation_message: str,
     can_close: bool,
     download_payload: bytes,
@@ -5389,17 +5627,19 @@ def _render_processing_export_panel(
     download_mime: str,
 ) -> None:
     st.markdown(f'<div class="section-title export-title">{html.escape(module_config.export_label)}</div>', unsafe_allow_html=True)
-    checkbox_col_1, checkbox_col_2, button_col = st.columns([1.1, 0.9, 1.1], gap="small")
+    checkbox_col_1, checkbox_col_2, checkbox_col_3, button_col = st.columns([1.0, 0.9, 0.9, 1.1], gap="small")
     with checkbox_col_1:
-        st.checkbox("Minuta de Carregamento", key=carregamento_checkbox_key)
+        st.checkbox("Minuta", key=carregamento_checkbox_key)
     with checkbox_col_2:
-        st.checkbox("Romaneio de Entrega", key=entrega_checkbox_key)
+        st.checkbox("Romaneio", key=entrega_checkbox_key)
+    with checkbox_col_3:
+        st.checkbox("XMLs", key=xml_checkbox_key)
     with button_col:
         st.button(
             "Gerar PDF",
             use_container_width=True,
             key="preparar_baixar_pdf_button",
-            disabled=bool(validation_message) and not can_close,
+            disabled=bool(validation_message),
             on_click=on_baixar_pdf_click,
         )
         st.download_button(
@@ -5430,14 +5670,18 @@ def render_processing_screen(
     balcao_summary = build_balcao_summary()
     carregamento_checkbox_key = f"{module_config.screen_key}_pdf_carregamento"
     entrega_checkbox_key = f"{module_config.screen_key}_pdf_entrega"
+    xml_checkbox_key = f"{module_config.screen_key}_pdf_xmls"
 
     if carregamento_checkbox_key not in st.session_state:
         st.session_state[carregamento_checkbox_key] = True
     if entrega_checkbox_key not in st.session_state:
         st.session_state[entrega_checkbox_key] = False
+    if xml_checkbox_key not in st.session_state:
+        st.session_state[xml_checkbox_key] = False
 
     carregamento_selected = bool(st.session_state.get(carregamento_checkbox_key, True))
     entrega_selected = bool(st.session_state.get(entrega_checkbox_key, False))
+    xml_selected = bool(st.session_state.get(xml_checkbox_key, False))
 
     sync_processing_context_for_excel(has_excel_loaded)
     finalize_message, finalize_error, finalize_warning = _process_processing_screen_actions(
@@ -5449,6 +5693,7 @@ def render_processing_screen(
         has_excel_loaded=has_excel_loaded,
         carregamento_selected=carregamento_selected,
         entrega_selected=entrega_selected,
+        xml_selected=xml_selected,
     )
     operational_panel_mode = resolve_operational_panel_mode(
         has_excel_loaded=has_excel_loaded,
@@ -5466,19 +5711,23 @@ def render_processing_screen(
     can_close = has_excel_loaded and not processed_df.empty
     validation_message = ""
     diagnostico = get_operacional_diagnostico()
-    if diagnostico and diagnostico.bloqueia_fechamento:
-        if diagnostico.requer_decisao and get_operacional_decisao() is None:
+    decisao = get_operacional_decisao()
+    if diagnostico and diagnostico.requer_decisao and decisao is None:
+        if not is_operacional_analise_confirmada():
             validation_message = (
-                "Revise o historico das NFs no painel operacional e selecione como deseja continuar."
+                "Revise o historico das NFs e clique em Continuar processamento para escolher a acao operacional."
             )
         else:
-            validation_message = "; ".join(
-                _humanizar_mensagem_operacional(item) for item in diagnostico.mensagens
-            ) or "Revise as ocorrencias operacionais antes de continuar."
-    elif diagnostico and diagnostico.requer_decisao and get_operacional_decisao() is None:
-        validation_message = "Selecione como deseja continuar no painel operacional."
-    elif not carregamento_selected and not entrega_selected:
-        validation_message = "Selecione ao menos um tipo de minuta para gerar o PDF"
+            validation_message = "Selecione como deseja continuar no painel operacional."
+    elif decisao == DecisaoOperacional.CANCELAR:
+        validation_message = "Selecione uma acao operacional para continuar ou use Cancelar operacao."
+    elif diagnostico and diagnostico.bloqueia_fechamento and decisao is None:
+        validation_message = (
+            "; ".join(_humanizar_mensagem_operacional(item) for item in diagnostico.mensagens)
+            or "Revise as ocorrencias operacionais antes de continuar."
+        )
+    elif not carregamento_selected and not entrega_selected and not xml_selected:
+        validation_message = "Selecione ao menos um tipo de documento para gerar o download"
     elif not can_close and not st.session_state.get("balcao_pending_confirm"):
         validation_message = "Processe um Excel valido para habilitar o fechamento via Baixar PDF."
 
@@ -5491,6 +5740,7 @@ def render_processing_screen(
         "module_config": module_config,
         "carregamento_checkbox_key": carregamento_checkbox_key,
         "entrega_checkbox_key": entrega_checkbox_key,
+        "xml_checkbox_key": xml_checkbox_key,
         "validation_message": validation_message,
         "can_close": can_close,
         "download_payload": download_payload,
@@ -5516,13 +5766,13 @@ def render_processing_screen(
         if finalize_error:
             st.error(finalize_error)
 
-        export_spacer, export_col = st.columns([3.2, 1.8], gap="medium")
+        export_spacer, export_col = st.columns([2.4, 2.6], gap="medium")
         with export_spacer:
             pass
         with export_col:
             _render_processing_export_panel(**export_kwargs)
     else:
-        action_col_search, action_col_download = st.columns([2.0, 1.8], gap="medium")
+        action_col_search, action_col_download = st.columns([1.7, 2.1], gap="medium")
 
         with action_col_search:
             _render_operational_panel(
@@ -6256,6 +6506,9 @@ def initialize_app_state() -> None:
     if "xml_upload_issues" not in st.session_state:
         st.session_state.xml_upload_issues = []
 
+    if "xml_import_report" not in st.session_state:
+        st.session_state.xml_import_report = None
+
     if "runtime_refresh_required" not in st.session_state:
         st.session_state["runtime_refresh_required"] = False
 
@@ -6323,6 +6576,13 @@ def render_global_app_styles() -> None:
         --brida-success: #166534;
         --brida-warning: #B45309;
         --brida-error: #B42318;
+    }
+    .logged-user-sidebar-name {
+        color: var(--brida-navy);
+        font-size: 0.92rem;
+        font-weight: 600;
+        margin: 0;
+        line-height: 1.35;
     }
     .stApp {
         background: var(--brida-gray-bg);
