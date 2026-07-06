@@ -8,7 +8,7 @@ from typing import Any, Literal
 import pandas as pd
 import streamlit as st
 
-from auth.security.session import get_current_user
+from auth.security import get_current_user
 from carregamentos.bootstrap import (
     get_analise_operacional_service,
     get_fechamento_service,
