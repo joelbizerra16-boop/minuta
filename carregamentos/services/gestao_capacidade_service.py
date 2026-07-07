@@ -8,8 +8,6 @@ from carregamentos.models.execucao_retencao import ConfirmacaoRetencao
 from carregamentos.models.retencao import PacoteRetencao
 from carregamentos.repository.retencao_repository import RetencaoRepository
 from carregamentos.repository.sql_retencao_repository import SqlRetencaoRepository
-from carregamentos.services.gestao_dados_service import GestaoDadosService
-from carregamentos.services.simulacao_retencao_service import SimulacaoRetencaoService
 from core.retention_policy import (
     CAPACITY_ORANGE_MIN_PERCENT,
     CAPACITY_RED_MIN_PERCENT,
@@ -24,6 +22,8 @@ from infrastructure.unit_of_work import UnitOfWork
 
 if TYPE_CHECKING:
     from carregamentos.services.execucao_retencao_service import ExecucaoRetencaoService
+    from carregamentos.services.gestao_dados_service import GestaoDadosService
+    from carregamentos.services.simulacao_retencao_service import SimulacaoRetencaoService
 
 
 class GestaoCapacidadeError(Exception):
@@ -41,7 +41,11 @@ class GestaoCapacidadeService:
         simulacao_service: SimulacaoRetencaoService | None = None,
         execucao_service: ExecucaoRetencaoService | None = None,
     ) -> None:
-        self._gestao_dados = gestao_dados_service or GestaoDadosService()
+        if gestao_dados_service is None:
+            from carregamentos.services.gestao_dados_service import GestaoDadosService
+
+            gestao_dados_service = GestaoDadosService()
+        self._gestao_dados = gestao_dados_service
         self._database_usage = database_usage_service or DatabaseUsageService()
         self._repository = retencao_repository or SqlRetencaoRepository()
         self._simulacao = simulacao_service

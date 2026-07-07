@@ -2,20 +2,23 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from carregamentos.repository.carregamento_repository import CarregamentoRepository
 from carregamentos.repository.sql_carregamento_repository import SqlCarregamentoRepository
 from carregamentos.services.analise_operacional_service import AnaliseOperacionalService
 from carregamentos.services.carregamento_service import CarregamentoService
 from carregamentos.services.fechamento_service import FechamentoCarregamentoService
-from carregamentos.services.gestao_capacidade_service import GestaoCapacidadeService
-from carregamentos.services.gestao_dados_service import GestaoDadosService
-from carregamentos.services.simulacao_retencao_service import SimulacaoRetencaoService
-from carregamentos.services.execucao_retencao_service import ExecucaoRetencaoService
 from carregamentos.services.historico_carregamento_service import HistoricoCarregamentoService
 from carregamentos.services.rastreabilidade_nf_service import RastreabilidadeNfService
 from carregamentos.services.xml_export_service import XmlExportService
 from infrastructure.database import get_pdf_storage_dir, get_xml_storage_dir
+
+if TYPE_CHECKING:
+    from carregamentos.services.execucao_retencao_service import ExecucaoRetencaoService
+    from carregamentos.services.gestao_capacidade_service import GestaoCapacidadeService
+    from carregamentos.services.gestao_dados_service import GestaoDadosService
+    from carregamentos.services.simulacao_retencao_service import SimulacaoRetencaoService
 
 _repository: CarregamentoRepository | None = None
 _fechamento_service: FechamentoCarregamentoService | None = None
@@ -29,6 +32,11 @@ _execucao_retencao_service: ExecucaoRetencaoService | None = None
 
 def configure_carregamentos_storage(data_dir: Path) -> CarregamentoRepository:
     global _repository, _fechamento_service, _analise_operacional_service, _historico_carregamento_service, _gestao_dados_service, _gestao_capacidade_service, _simulacao_retencao_service, _execucao_retencao_service
+    from carregamentos.services.execucao_retencao_service import ExecucaoRetencaoService
+    from carregamentos.services.gestao_capacidade_service import GestaoCapacidadeService
+    from carregamentos.services.gestao_dados_service import GestaoDadosService
+    from carregamentos.services.simulacao_retencao_service import SimulacaoRetencaoService
+
     _ = data_dir
     _repository = SqlCarregamentoRepository()
     _repository.storage_dir.mkdir(parents=True, exist_ok=True)
