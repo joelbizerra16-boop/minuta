@@ -8,25 +8,50 @@ from carregamentos.repository.sql_carregamento_repository import SqlCarregamento
 from carregamentos.services.analise_operacional_service import AnaliseOperacionalService
 from carregamentos.services.carregamento_service import CarregamentoService
 from carregamentos.services.fechamento_service import FechamentoCarregamentoService
+from carregamentos.services.gestao_capacidade_service import GestaoCapacidadeService
+from carregamentos.services.gestao_dados_service import GestaoDadosService
+from carregamentos.services.simulacao_retencao_service import SimulacaoRetencaoService
+from carregamentos.services.execucao_retencao_service import ExecucaoRetencaoService
 from carregamentos.services.historico_carregamento_service import HistoricoCarregamentoService
 from carregamentos.services.rastreabilidade_nf_service import RastreabilidadeNfService
 from carregamentos.services.xml_export_service import XmlExportService
-from infrastructure.database import get_pdf_storage_dir
+from infrastructure.database import get_pdf_storage_dir, get_xml_storage_dir
 
 _repository: CarregamentoRepository | None = None
 _fechamento_service: FechamentoCarregamentoService | None = None
 _analise_operacional_service: AnaliseOperacionalService | None = None
 _historico_carregamento_service: HistoricoCarregamentoService | None = None
+_gestao_dados_service: GestaoDadosService | None = None
+_gestao_capacidade_service: GestaoCapacidadeService | None = None
+_simulacao_retencao_service: SimulacaoRetencaoService | None = None
+_execucao_retencao_service: ExecucaoRetencaoService | None = None
 
 
 def configure_carregamentos_storage(data_dir: Path) -> CarregamentoRepository:
-    global _repository, _fechamento_service, _analise_operacional_service, _historico_carregamento_service
+    global _repository, _fechamento_service, _analise_operacional_service, _historico_carregamento_service, _gestao_dados_service, _gestao_capacidade_service, _simulacao_retencao_service, _execucao_retencao_service
     _ = data_dir
     _repository = SqlCarregamentoRepository()
     _repository.storage_dir.mkdir(parents=True, exist_ok=True)
     _fechamento_service = FechamentoCarregamentoService(_repository, get_pdf_storage_dir())
     _analise_operacional_service = AnaliseOperacionalService(_repository)
     _historico_carregamento_service = HistoricoCarregamentoService(_repository)
+    _gestao_dados_service = GestaoDadosService(pdf_storage_dir=get_pdf_storage_dir())
+    _simulacao_retencao_service = SimulacaoRetencaoService(
+        gestao_dados_service=_gestao_dados_service,
+        pdf_storage_dir=get_pdf_storage_dir(),
+        xml_storage_dir=get_xml_storage_dir(),
+    )
+    _execucao_retencao_service = ExecucaoRetencaoService(
+        simulacao_service=_simulacao_retencao_service,
+        pdf_storage_dir=get_pdf_storage_dir(),
+        xml_storage_dir=get_xml_storage_dir(),
+    )
+    _gestao_capacidade_service = GestaoCapacidadeService(
+        gestao_dados_service=_gestao_dados_service,
+        simulacao_service=_simulacao_retencao_service,
+        execucao_service=_execucao_retencao_service,
+    )
+    _gestao_dados_service._capacidade_service = _gestao_capacidade_service
     return _repository
 
 
@@ -72,3 +97,31 @@ def get_historico_carregamento_service() -> HistoricoCarregamentoService:
     if _historico_carregamento_service is None:
         raise RuntimeError("Carregamentos storage not configured. Call configure_carregamentos_storage first.")
     return _historico_carregamento_service
+
+
+def get_gestao_dados_service() -> GestaoDadosService:
+    if _gestao_dados_service is None:
+        raise RuntimeError("Carregamentos storage not configured. Call configure_carregamentos_storage first.")
+    return _gestao_dados_service
+
+
+def get_gestao_retencao_service() -> GestaoDadosService:
+    return get_gestao_dados_service()
+
+
+def get_gestao_capacidade_service() -> GestaoCapacidadeService:
+    if _gestao_capacidade_service is None:
+        raise RuntimeError("Carregamentos storage not configured. Call configure_carregamentos_storage first.")
+    return _gestao_capacidade_service
+
+
+def get_simulacao_retencao_service() -> SimulacaoRetencaoService:
+    if _simulacao_retencao_service is None:
+        raise RuntimeError("Carregamentos storage not configured. Call configure_carregamentos_storage first.")
+    return _simulacao_retencao_service
+
+
+def get_execucao_retencao_service() -> ExecucaoRetencaoService:
+    if _execucao_retencao_service is None:
+        raise RuntimeError("Carregamentos storage not configured. Call configure_carregamentos_storage first.")
+    return _execucao_retencao_service

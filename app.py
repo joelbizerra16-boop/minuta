@@ -98,6 +98,8 @@ from carregamentos.ui.xml_import_summary_panel import (
     render_xml_import_summary_panel,
 )
 from carregamentos.pages.consulta import render_consulta_carregamentos_page
+from carregamentos.pages.gestao_dados import render_gestao_dados_page
+from carregamentos.bootstrap import get_gestao_capacidade_service, get_gestao_dados_service
 from carregamentos.services.nf_validation import localizar_nf_no_lote
 from infrastructure.storage.config_storage import (
     CONFIG_CHAVE_CLASSIFICACAO_PRODUTOS,
@@ -253,6 +255,8 @@ SCREEN_SEPARACAO = "separacao"
 SCREEN_LOTES = "lotes"
 SCREEN_USUARIOS = "usuarios"
 SCREEN_CONSULTA_CARREGAMENTOS = "consulta_carregamentos"
+SCREEN_GESTAO_DADOS = "gestao_dados"
+SCREEN_GESTAO_RETENCAO = "gestao_retencao"
 ICON_MAP = {
     "dados_gerais": "folder",
     "filial": "building",
@@ -278,6 +282,8 @@ ICON_MAP = {
     "usuarios": "user_badge",
     "cadastro_usuarios": "sheet",
     "consulta_carregamentos": "truck",
+    "gestao_dados": "folder",
+    "gestao_retencao": "folder",
 }
 
 ICON_SVG = {
@@ -4708,6 +4714,8 @@ def normalize_screen_name(value: object) -> str:
         SCREEN_LOTES: SCREEN_LOTES,
         SCREEN_USUARIOS: SCREEN_USUARIOS,
         SCREEN_CONSULTA_CARREGAMENTOS: SCREEN_CONSULTA_CARREGAMENTOS,
+        SCREEN_GESTAO_DADOS: SCREEN_GESTAO_DADOS,
+        SCREEN_GESTAO_RETENCAO: SCREEN_GESTAO_DADOS,
     }
     return screen_aliases.get(screen, SCREEN_MENU)
 
@@ -4913,6 +4921,158 @@ def toggle_menu() -> None:
     st.session_state["menu_aberto"] = not st.session_state.get("menu_aberto", True)
 
 
+def render_sidebar_dados_navigation() -> None:
+    current_screen = normalize_screen_name(st.session_state.get("tela", SCREEN_MENU))
+    button_type = "primary" if current_screen == SCREEN_GESTAO_DADOS else "secondary"
+    if st.button(
+        "🗃 Gestao de Dados",
+        use_container_width=True,
+        key="sidebar_nav_gestao_dados",
+        type=button_type,
+    ):
+        navegar(SCREEN_GESTAO_DADOS)
+
+
+def render_sidebar_retencao_navigation() -> None:
+    render_sidebar_dados_navigation()
+
+
+def maybe_prompt_capacidade_critica() -> None:
+    if st.session_state.get("_capacidade_prompt_checked"):
+        return
+    st.session_state["_capacidade_prompt_checked"] = True
+    if st.session_state.get("_capacidade_prompt_dismissed"):
+        return
+    try:
+        capacidade = get_gestao_capacidade_service().avaliar_capacidade()
+    except Exception:
+        return
+    if not capacidade.requer_dialogo_login:
+        return
+    st.session_state["_capacidade_prompt_snapshot"] = capacidade
+    st.session_state["_capacidade_prompt_pending"] = True
+
+
+def maybe_prompt_gestao_dados() -> None:
+    if st.session_state.get("_gestao_dados_prompt_checked"):
+        return
+    st.session_state["_gestao_dados_prompt_checked"] = True
+    if st.session_state.get("_gestao_dados_prompt_dismissed"):
+        return
+    try:
+        if not get_gestao_dados_service().possui_carregamentos_elegiveis():
+            return
+    except Exception:
+        return
+
+    st.session_state["_gestao_dados_prompt_pending"] = True
+
+
+def maybe_prompt_retencao_expirada() -> None:
+    maybe_prompt_gestao_dados()
+
+
+def _formatar_bytes_resumo(value: int) -> str:
+    total = max(int(value), 0)
+    if total >= 1024 * 1024:
+        return f"{total / (1024 * 1024):.1f} MB"
+    if total >= 1024:
+        return f"{total / 1024:.1f} KB"
+    return f"{total} B"
+
+
+def render_capacidade_login_prompt() -> None:
+    pending = bool(st.session_state.pop("_capacidade_prompt_pending", False))
+    if not pending:
+        return
+    if st.session_state.get("_capacidade_prompt_dismissed"):
+        return
+
+    capacidade = st.session_state.pop("_capacidade_prompt_snapshot", None)
+    if capacidade is None:
+        return
+
+    previa = None
+    try:
+        previa = get_gestao_capacidade_service().montar_previa_dia_mais_antigo()
+    except Exception:
+        pass
+
+    usuario = get_current_user()
+    if usuario is not None:
+        try:
+            get_gestao_capacidade_service().registrar_auditoria_capacidade(
+                usuario_id=int(usuario.id),
+                capacidade=capacidade,
+                previa=previa,
+            )
+        except Exception:
+            pass
+
+    pct = capacidade.percentual
+    pct_texto = f"{pct:.0f}%" if pct is not None else "90%"
+    with st.container(border=True):
+        st.markdown("#### Capacidade do Banco de Dados")
+        st.warning(
+            f"O banco de dados atingiu **{pct_texto}** da capacidade operacional.\n\n"
+            "Para manter a estabilidade do sistema recomendamos executar a retencao do dia mais antigo.\n\n"
+            "Deseja realizar agora?"
+        )
+        if previa is None:
+            st.caption("Nao ha dia elegivel para retencao sugerida no momento.")
+        col_executar, col_depois = st.columns(2)
+        with col_executar:
+            if st.button("Executar Retencao", use_container_width=True, key="capacidade_prompt_executar"):
+                st.session_state["gestao_dados_capacidade_iniciar"] = True
+                navegar(SCREEN_GESTAO_DADOS)
+        with col_depois:
+            if st.button("Depois", use_container_width=True, key="capacidade_prompt_depois"):
+                st.session_state["_capacidade_prompt_dismissed"] = True
+                st.rerun()
+
+
+def render_gestao_dados_login_prompt() -> None:
+    render_capacidade_login_prompt()
+    pending = bool(
+        st.session_state.pop("_gestao_dados_prompt_pending", False)
+        or st.session_state.pop("_retencao_prompt_pending", False)
+    )
+    if not pending:
+        return
+    if st.session_state.get("_gestao_dados_prompt_dismissed") or st.session_state.get("_retencao_prompt_dismissed"):
+        return
+
+    try:
+        painel = get_gestao_dados_service().obter_painel()
+    except Exception:
+        return
+
+    pacote = painel.pacote
+    with st.container(border=True):
+        st.markdown("#### Gestao de Dados")
+        st.warning(
+            f"Foram encontrados **{pacote.carregamentos:,} carregamentos** "
+            "fora da politica de retencao."
+        )
+        st.markdown(
+            f"**Espaco estimado recuperavel:** {_formatar_bytes_resumo(pacote.espaco_recuperavel_bytes)}"
+        )
+        st.caption("Deseja visualizar a analise? Nenhum dado sera removido nesta etapa.")
+        col_abrir, col_depois = st.columns(2)
+        with col_abrir:
+            if st.button("Abrir Gestao", use_container_width=True, key="gestao_dados_prompt_abrir"):
+                navegar(SCREEN_GESTAO_DADOS)
+        with col_depois:
+            if st.button("Depois", use_container_width=True, key="gestao_dados_prompt_depois"):
+                st.session_state["_gestao_dados_prompt_dismissed"] = True
+                st.session_state["_retencao_prompt_dismissed"] = True
+                st.rerun()
+
+
+def render_retencao_login_prompt() -> None:
+    render_gestao_dados_login_prompt()
+
+
 def apply_sidebar_visibility(menu_aberto: bool) -> None:
     """Sem CSS no sidebar — expandir/recolher fica a cargo do Streamlit."""
     _ = menu_aberto
@@ -5003,6 +5163,9 @@ def render_sidebar() -> tuple[list, object, bool]:
     with measure("sql.carregar_xmls_runtime"):
         xml_records, _ = load_runtime_reference_data()
     with st.sidebar:
+        render_logged_user_badge()
+        render_sidebar_dados_navigation()
+        st.divider()
         xml_storage_error = str(st.session_state.get("runtime_xml_storage_error", "") or "")
         if xml_storage_error:
             st.warning(xml_storage_error)
@@ -7425,6 +7588,10 @@ def render_active_screen(current_screen: str, process_clicked: bool, excel_file)
         tela_consulta_carregamentos()
         return
 
+    if current_screen == SCREEN_GESTAO_DADOS:
+        tela_gestao_dados()
+        return
+
     tela_lotes(separacao_records)
 
 
@@ -7581,6 +7748,14 @@ def tela_consulta_carregamentos() -> None:
     render_consulta_carregamentos_page(render_header_callback=render_screen_header)
 
 
+def tela_gestao_dados() -> None:
+    render_gestao_dados_page(render_header_callback=render_screen_header)
+
+
+def tela_gestao_retencao() -> None:
+    tela_gestao_dados()
+
+
 def render_main_screen() -> None:
     with measure("ui.render_main_screen"):
         initialize_app_state()
@@ -7592,9 +7767,15 @@ def render_main_screen() -> None:
             st.session_state["login_success"] = ""
         current_screen = normalize_screen_name(st.session_state.get("tela", SCREEN_MENU))
         if current_screen == SCREEN_MENU:
+            with st.sidebar:
+                render_logged_user_badge()
+                render_sidebar_dados_navigation()
             tela_menu()
+            render_gestao_dados_login_prompt()
             _render_performance_report_panel()
             return
+
+        render_gestao_dados_login_prompt()
 
         if "menu_aberto" not in st.session_state:
             st.session_state["menu_aberto"] = True
@@ -7642,6 +7823,8 @@ def main() -> None:
             render_login_screen()
         return
 
+    maybe_prompt_capacidade_critica()
+    maybe_prompt_gestao_dados()
     render_main_screen()
 
 
