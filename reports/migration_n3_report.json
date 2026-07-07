@@ -1,0 +1,1389 @@
+{
+  "fase": "N3",
+  "timestamp_utc": "2026-07-07T21:31:36.903284+00:00",
+  "aprovada": true,
+  "bloqueador": null,
+  "sqlite_source": {
+    "driver": "sqlite",
+    "host": null,
+    "database": "C:/MinutaData/minuta_dev.db",
+    "dialect": "sqlite"
+  },
+  "postgres_target": {
+    "driver": "postgresql+psycopg2",
+    "host": "ep-snowy-rain-atlh3iwb-pooler.c-9.us-east-1.aws.neon.tech",
+    "database": "neondb",
+    "dialect": "postgresql"
+  },
+  "inventario": {
+    "source_dialect": "sqlite",
+    "total_rows": 5455,
+    "duration_ms": 103.78,
+    "tables": [
+      {
+        "name": "perfil",
+        "row_count": 2,
+        "columns": [
+          "id",
+          "codigo",
+          "nome"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "checksum": "4126f266fe221e669655f222166e4170ec667eeaf79c62627cefcc2e4ce734d6"
+      },
+      {
+        "name": "usuario",
+        "row_count": 2,
+        "columns": [
+          "id",
+          "uuid",
+          "nome",
+          "usuario",
+          "senha_hash",
+          "perfil_id",
+          "perfil",
+          "bloqueado",
+          "ultimo_login",
+          "criado_por_id",
+          "atualizado_por_id",
+          "criado_em",
+          "atualizado_em",
+          "ativo",
+          "excluido_em"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [
+          {
+            "name": null,
+            "constrained_columns": [
+              "perfil_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "perfil",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "RESTRICT",
+              "onupdate": "CASCADE"
+            }
+          },
+          {
+            "name": null,
+            "constrained_columns": [
+              "criado_por_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "usuario",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "SET NULL",
+              "onupdate": "CASCADE"
+            }
+          },
+          {
+            "name": null,
+            "constrained_columns": [
+              "atualizado_por_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "usuario",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "SET NULL",
+              "onupdate": "CASCADE"
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "name": "ix_usuario_perfil_id",
+            "column_names": [
+              "perfil_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          }
+        ],
+        "checksum": "72d72ea462708b2b943f0e263564026fb6f61545cda79daca668a1f89702d2b0"
+      },
+      {
+        "name": "configuracao",
+        "row_count": 1,
+        "columns": [
+          "id",
+          "chave",
+          "valor",
+          "categoria",
+          "tipo_valor",
+          "descricao",
+          "atualizado_por_usuario_id",
+          "criado_em",
+          "atualizado_em"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [
+          {
+            "name": null,
+            "constrained_columns": [
+              "atualizado_por_usuario_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "usuario",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "SET NULL",
+              "onupdate": "CASCADE"
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "name": "ix_configuracao_atualizado_por_usuario_id",
+            "column_names": [
+              "atualizado_por_usuario_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_configuracao_categoria",
+            "column_names": [
+              "categoria"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          }
+        ],
+        "checksum": "1b0820af8d344d52622ae63fe9c5408c332176d0f94f053c5dca0fc729d2aed0"
+      },
+      {
+        "name": "motorista",
+        "row_count": 0,
+        "columns": [
+          "id",
+          "nome",
+          "criado_em",
+          "atualizado_em",
+          "ativo",
+          "excluido_em"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [],
+        "indexes": [
+          {
+            "name": "ix_motorista_nome",
+            "column_names": [
+              "nome"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "uq_motorista_nome_ativo",
+            "column_names": [
+              "nome"
+            ],
+            "unique": 1,
+            "dialect_options": {
+              "sqlite_where": "ativo = 1 AND excluido_em IS NULL"
+            }
+          }
+        ],
+        "checksum": ""
+      },
+      {
+        "name": "veiculo",
+        "row_count": 0,
+        "columns": [
+          "id",
+          "placa",
+          "criado_em",
+          "atualizado_em",
+          "ativo",
+          "excluido_em"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [],
+        "indexes": [
+          {
+            "name": "ix_veiculo_placa",
+            "column_names": [
+              "placa"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "uq_veiculo_placa_ativo",
+            "column_names": [
+              "placa"
+            ],
+            "unique": 1,
+            "dialect_options": {
+              "sqlite_where": "ativo = 1 AND excluido_em IS NULL"
+            }
+          }
+        ],
+        "checksum": ""
+      },
+      {
+        "name": "destinatario",
+        "row_count": 0,
+        "columns": [
+          "id",
+          "razao_social",
+          "municipio",
+          "uf",
+          "criado_em",
+          "atualizado_em",
+          "ativo",
+          "excluido_em"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [],
+        "indexes": [
+          {
+            "name": "ix_destinatario_municipio_uf",
+            "column_names": [
+              "municipio",
+              "uf"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_destinatario_razao_social",
+            "column_names": [
+              "razao_social"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "uq_destinatario_razao_municipio_uf_ativo",
+            "column_names": [
+              "razao_social",
+              "municipio",
+              "uf"
+            ],
+            "unique": 1,
+            "dialect_options": {
+              "sqlite_where": "ativo = 1 AND excluido_em IS NULL"
+            }
+          }
+        ],
+        "checksum": ""
+      },
+      {
+        "name": "rota",
+        "row_count": 0,
+        "columns": [
+          "id",
+          "nome",
+          "criado_em",
+          "atualizado_em",
+          "ativo",
+          "excluido_em"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [],
+        "indexes": [
+          {
+            "name": "ix_rota_nome",
+            "column_names": [
+              "nome"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "uq_rota_nome_ativo",
+            "column_names": [
+              "nome"
+            ],
+            "unique": 1,
+            "dialect_options": {
+              "sqlite_where": "ativo = 1 AND excluido_em IS NULL"
+            }
+          }
+        ],
+        "checksum": ""
+      },
+      {
+        "name": "nota_fiscal",
+        "row_count": 1055,
+        "columns": [
+          "id",
+          "chave_nfe",
+          "numero_nf",
+          "emitente",
+          "destinatario_id",
+          "rota_id",
+          "destinatario",
+          "municipio",
+          "uf",
+          "rota",
+          "status_nf",
+          "tipo_xml",
+          "data_emissao",
+          "data_referencia",
+          "valor_total",
+          "peso_total",
+          "volume_total",
+          "arquivo_origem",
+          "versao",
+          "criado_em",
+          "atualizado_em"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [
+          {
+            "name": null,
+            "constrained_columns": [
+              "destinatario_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "destinatario",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "RESTRICT",
+              "onupdate": "CASCADE"
+            }
+          },
+          {
+            "name": null,
+            "constrained_columns": [
+              "rota_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "rota",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "RESTRICT",
+              "onupdate": "CASCADE"
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "name": "ix_nota_fiscal_data_emissao",
+            "column_names": [
+              "data_emissao"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_nota_fiscal_destinatario",
+            "column_names": [
+              "destinatario"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_nota_fiscal_destinatario_id",
+            "column_names": [
+              "destinatario_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_nota_fiscal_destinatario_status",
+            "column_names": [
+              "destinatario",
+              "status_nf"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_nota_fiscal_numero_nf",
+            "column_names": [
+              "numero_nf"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_nota_fiscal_numero_nf_emitente",
+            "column_names": [
+              "numero_nf",
+              "emitente"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_nota_fiscal_rota",
+            "column_names": [
+              "rota"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_nota_fiscal_rota_data_emissao",
+            "column_names": [
+              "rota",
+              "data_emissao"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_nota_fiscal_rota_id",
+            "column_names": [
+              "rota_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_nota_fiscal_status_nf",
+            "column_names": [
+              "status_nf"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          }
+        ],
+        "checksum": "8580dec36f0d1389c6c4278c4f63596644de53d3ada7a84fbfebbc8922b7f7ce"
+      },
+      {
+        "name": "item_nota_fiscal",
+        "row_count": 2207,
+        "columns": [
+          "id",
+          "nota_fiscal_id",
+          "sequencia",
+          "codigo_produto",
+          "descricao",
+          "quantidade",
+          "unidade",
+          "peso"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [
+          {
+            "name": null,
+            "constrained_columns": [
+              "nota_fiscal_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "nota_fiscal",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "RESTRICT",
+              "onupdate": "CASCADE"
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "name": "ix_item_nota_fiscal_codigo_produto",
+            "column_names": [
+              "codigo_produto"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_item_nota_fiscal_nf_codigo",
+            "column_names": [
+              "nota_fiscal_id",
+              "codigo_produto"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_item_nota_fiscal_nota_fiscal_id",
+            "column_names": [
+              "nota_fiscal_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          }
+        ],
+        "checksum": "bd5abc598c456c1596ca1dd5672f5727687cba72d0e56281c336c323853aa3de"
+      },
+      {
+        "name": "carregamento",
+        "row_count": 30,
+        "columns": [
+          "id",
+          "numero_carregamento",
+          "usuario_id",
+          "motorista_id",
+          "veiculo_id",
+          "data",
+          "hora",
+          "motorista",
+          "placa",
+          "filial",
+          "data_saida",
+          "modalidade",
+          "status",
+          "reentrega",
+          "quantidade_nf",
+          "quantidade_itens",
+          "peso_total",
+          "versao",
+          "quantidade_impressoes",
+          "ultima_impressao_em",
+          "ultima_impressao_usuario_id",
+          "criado_em",
+          "atualizado_em"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [
+          {
+            "name": null,
+            "constrained_columns": [
+              "usuario_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "usuario",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "RESTRICT",
+              "onupdate": "CASCADE"
+            }
+          },
+          {
+            "name": null,
+            "constrained_columns": [
+              "motorista_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "motorista",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "RESTRICT",
+              "onupdate": "CASCADE"
+            }
+          },
+          {
+            "name": null,
+            "constrained_columns": [
+              "veiculo_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "veiculo",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "RESTRICT",
+              "onupdate": "CASCADE"
+            }
+          },
+          {
+            "name": null,
+            "constrained_columns": [
+              "ultima_impressao_usuario_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "usuario",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "SET NULL",
+              "onupdate": "CASCADE"
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "name": "ix_carregamento_data",
+            "column_names": [
+              "data"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_data_status",
+            "column_names": [
+              "data",
+              "status"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_modalidade",
+            "column_names": [
+              "modalidade"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_modalidade_status",
+            "column_names": [
+              "modalidade",
+              "status"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_motorista",
+            "column_names": [
+              "motorista"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_motorista_data",
+            "column_names": [
+              "motorista",
+              "data"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_motorista_id",
+            "column_names": [
+              "motorista_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_placa",
+            "column_names": [
+              "placa"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_placa_data",
+            "column_names": [
+              "placa",
+              "data"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_status",
+            "column_names": [
+              "status"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_ultima_impressao_usuario_id",
+            "column_names": [
+              "ultima_impressao_usuario_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_usuario_data",
+            "column_names": [
+              "usuario_id",
+              "data"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_usuario_id",
+            "column_names": [
+              "usuario_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_carregamento_veiculo_id",
+            "column_names": [
+              "veiculo_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          }
+        ],
+        "checksum": "221ec915d6b2b9c7463cdc94f46803ea89d5898286af00fe8cc6b4864b9f04cf"
+      },
+      {
+        "name": "item_carregamento",
+        "row_count": 972,
+        "columns": [
+          "id",
+          "carregamento_id",
+          "nota_fiscal_id",
+          "chave_nfe",
+          "numero_nf",
+          "codigo_produto",
+          "descricao",
+          "quantidade",
+          "unidade",
+          "peso",
+          "destinatario",
+          "rota",
+          "status_nf",
+          "sequencia"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [
+          {
+            "name": null,
+            "constrained_columns": [
+              "carregamento_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "carregamento",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "RESTRICT",
+              "onupdate": "CASCADE"
+            }
+          },
+          {
+            "name": null,
+            "constrained_columns": [
+              "nota_fiscal_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "nota_fiscal",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "SET NULL",
+              "onupdate": "CASCADE"
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "name": "ix_item_carregamento_carregamento_id",
+            "column_names": [
+              "carregamento_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_item_carregamento_chave_nfe",
+            "column_names": [
+              "chave_nfe"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_item_carregamento_codigo_produto",
+            "column_names": [
+              "codigo_produto"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_item_carregamento_destinatario",
+            "column_names": [
+              "destinatario"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_item_carregamento_destinatario_rota",
+            "column_names": [
+              "destinatario",
+              "rota"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_item_carregamento_nf_chave",
+            "column_names": [
+              "numero_nf",
+              "chave_nfe"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_item_carregamento_nota_fiscal_id",
+            "column_names": [
+              "nota_fiscal_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_item_carregamento_numero_nf",
+            "column_names": [
+              "numero_nf"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_item_carregamento_rota",
+            "column_names": [
+              "rota"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          }
+        ],
+        "checksum": "515098a88d20d14e096089f2675e423abff83f36223218b079c77f867c46ce24"
+      },
+      {
+        "name": "documento",
+        "row_count": 55,
+        "columns": [
+          "id",
+          "carregamento_id",
+          "usuario_id",
+          "tipo",
+          "caminho_arquivo",
+          "nome_arquivo",
+          "hash_sha256",
+          "criado_em"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [
+          {
+            "name": null,
+            "constrained_columns": [
+              "carregamento_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "carregamento",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "RESTRICT",
+              "onupdate": "CASCADE"
+            }
+          },
+          {
+            "name": null,
+            "constrained_columns": [
+              "usuario_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "usuario",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "RESTRICT",
+              "onupdate": "CASCADE"
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "name": "ix_documento_carregamento_id",
+            "column_names": [
+              "carregamento_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_documento_criado_em",
+            "column_names": [
+              "criado_em"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_documento_hash_sha256",
+            "column_names": [
+              "hash_sha256"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_documento_tipo",
+            "column_names": [
+              "tipo"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_documento_tipo_criado_em",
+            "column_names": [
+              "tipo",
+              "criado_em"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_documento_usuario_id",
+            "column_names": [
+              "usuario_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          }
+        ],
+        "checksum": "e7c6666d37ed9dcc830b342afbcc14331eb3bbbbcd11033583849b8df18c36b6"
+      },
+      {
+        "name": "documento_xml",
+        "row_count": 1046,
+        "columns": [
+          "id",
+          "chave_nfe",
+          "numero_nf",
+          "nome_arquivo",
+          "caminho_arquivo",
+          "hash_sha256",
+          "tamanho",
+          "usuario_id",
+          "data_importacao",
+          "ativo"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [
+          {
+            "name": null,
+            "constrained_columns": [
+              "usuario_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "usuario",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "SET NULL",
+              "onupdate": "CASCADE"
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "name": "ix_documento_xml_ativo",
+            "column_names": [
+              "ativo"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_documento_xml_data_importacao",
+            "column_names": [
+              "data_importacao"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_documento_xml_hash_sha256",
+            "column_names": [
+              "hash_sha256"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_documento_xml_numero_nf",
+            "column_names": [
+              "numero_nf"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_documento_xml_usuario_id",
+            "column_names": [
+              "usuario_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          }
+        ],
+        "checksum": "7957f443c690cba40069ee620f14ee8ba6dcc68631f40929f8cd82848bb1ce84"
+      },
+      {
+        "name": "historico_operacional",
+        "row_count": 30,
+        "columns": [
+          "id",
+          "carregamento_id",
+          "usuario_id",
+          "item_carregamento_id",
+          "evento",
+          "descricao",
+          "criado_em"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [
+          {
+            "name": null,
+            "constrained_columns": [
+              "carregamento_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "carregamento",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "RESTRICT",
+              "onupdate": "CASCADE"
+            }
+          },
+          {
+            "name": null,
+            "constrained_columns": [
+              "usuario_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "usuario",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "RESTRICT",
+              "onupdate": "CASCADE"
+            }
+          },
+          {
+            "name": null,
+            "constrained_columns": [
+              "item_carregamento_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "item_carregamento",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "SET NULL",
+              "onupdate": "CASCADE"
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "name": "ix_historico_operacional_carregamento_criado_em",
+            "column_names": [
+              "carregamento_id",
+              "criado_em"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_historico_operacional_carregamento_id",
+            "column_names": [
+              "carregamento_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_historico_operacional_criado_em",
+            "column_names": [
+              "criado_em"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_historico_operacional_evento",
+            "column_names": [
+              "evento"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_historico_operacional_evento_criado_em",
+            "column_names": [
+              "evento",
+              "criado_em"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_historico_operacional_item_carregamento_id",
+            "column_names": [
+              "item_carregamento_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_historico_operacional_usuario_id",
+            "column_names": [
+              "usuario_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          }
+        ],
+        "checksum": "0432e41e2e2e4c38fb958a025e044370e7d7b14312ecb396eb86e25e18b1e5a8"
+      },
+      {
+        "name": "evento_auditoria",
+        "row_count": 55,
+        "columns": [
+          "id",
+          "usuario_id",
+          "categoria",
+          "evento",
+          "entidade_tipo",
+          "entidade_id",
+          "descricao",
+          "metadados_json",
+          "ip_origem",
+          "criado_em"
+        ],
+        "primary_key": [
+          "id"
+        ],
+        "foreign_keys": [
+          {
+            "name": null,
+            "constrained_columns": [
+              "usuario_id"
+            ],
+            "referred_schema": null,
+            "referred_table": "usuario",
+            "referred_columns": [
+              "id"
+            ],
+            "options": {
+              "ondelete": "SET NULL",
+              "onupdate": "CASCADE"
+            }
+          }
+        ],
+        "indexes": [
+          {
+            "name": "ix_evento_auditoria_categoria",
+            "column_names": [
+              "categoria"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_evento_auditoria_categoria_evento",
+            "column_names": [
+              "categoria",
+              "evento"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_evento_auditoria_criado_em",
+            "column_names": [
+              "criado_em"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_evento_auditoria_entidade",
+            "column_names": [
+              "entidade_tipo",
+              "entidade_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_evento_auditoria_evento",
+            "column_names": [
+              "evento"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_evento_auditoria_usuario_criado_em",
+            "column_names": [
+              "usuario_id",
+              "criado_em"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          },
+          {
+            "name": "ix_evento_auditoria_usuario_id",
+            "column_names": [
+              "usuario_id"
+            ],
+            "unique": 0,
+            "dialect_options": {}
+          }
+        ],
+        "checksum": "f4a626e977a5e71ae238ce73f0d436aa8a7f2a1d5170bf3c107961a623ff3b54"
+      }
+    ]
+  },
+  "extracao": {
+    "duration_ms": 201.44,
+    "row_counts": {
+      "perfil": 2,
+      "motorista": 0,
+      "veiculo": 0,
+      "destinatario": 0,
+      "rota": 0,
+      "usuario": 2,
+      "configuracao": 1,
+      "nota_fiscal": 1055,
+      "item_nota_fiscal": 2207,
+      "carregamento": 30,
+      "item_carregamento": 972,
+      "documento": 55,
+      "documento_xml": 1046,
+      "historico_operacional": 30,
+      "evento_auditoria": 55
+    },
+    "total_rows": 5455
+  },
+  "validacao_pre_carga": {
+    "ok": true,
+    "erros": []
+  },
+  "carga": {
+    "tables_loaded": {
+      "perfil": 2,
+      "motorista": 0,
+      "veiculo": 0,
+      "destinatario": 0,
+      "rota": 0,
+      "usuario": 2,
+      "configuracao": 1,
+      "nota_fiscal": 1055,
+      "item_nota_fiscal": 2207,
+      "carregamento": 30,
+      "item_carregamento": 972,
+      "documento": 55,
+      "documento_xml": 1046,
+      "historico_operacional": 30,
+      "evento_auditoria": 55
+    },
+    "total_rows": 5455,
+    "duration_ms": 27398.05,
+    "rolled_back": false,
+    "error": null
+  },
+  "validacao_pos_carga": {
+    "equivalente": true,
+    "diferencas": [],
+    "avisos_checksum": [
+      "checksum_repr:usuario",
+      "checksum_repr:configuracao",
+      "checksum_repr:nota_fiscal",
+      "checksum_repr:item_nota_fiscal",
+      "checksum_repr:carregamento",
+      "checksum_repr:item_carregamento",
+      "checksum_repr:documento",
+      "checksum_repr:documento_xml",
+      "checksum_repr:historico_operacional",
+      "checksum_repr:evento_auditoria"
+    ]
+  },
+  "arquivos": {
+    "xml_arquivos": 0,
+    "pdf_arquivos": 56
+  },
+  "tempos_ms": {
+    "inventario": 104.01,
+    "extracao": 201.44,
+    "alembic": 4799.12,
+    "carga": 27398.05,
+    "validacao_pos_carga": 63627.92
+  },
+  "erros": [],
+  "avisos": [
+    "Destino continha dados — TRUNCATE CASCADE sera executado antes da carga.",
+    "checksum_repr:usuario",
+    "checksum_repr:configuracao",
+    "checksum_repr:nota_fiscal",
+    "checksum_repr:item_nota_fiscal",
+    "checksum_repr:carregamento",
+    "checksum_repr:item_carregamento",
+    "checksum_repr:documento",
+    "checksum_repr:documento_xml",
+    "checksum_repr:historico_operacional",
+    "checksum_repr:evento_auditoria"
+  ],
+  "rollback": {
+    "estrategia": "transacao_com_truncate_e_rollback_em_falha",
+    "sqlite_preservado": true,
+    "instrucao": "Para rollback operacional, redefina MINUTA_DATABASE_URL para o SQLite de origem."
+  }
+}

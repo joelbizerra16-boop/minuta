@@ -13,6 +13,12 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _boolean_default_true():
+    if op.get_bind().dialect.name == "postgresql":
+        return sa.text("true")
+    return sa.text("1")
+
+
 def upgrade() -> None:
     op.create_table(
         "documento_xml",
@@ -30,7 +36,7 @@ def upgrade() -> None:
             server_default=sa.text("(CURRENT_TIMESTAMP)"),
             nullable=False,
         ),
-        sa.Column("ativo", sa.Boolean(), server_default=sa.text("1"), nullable=False),
+        sa.Column("ativo", sa.Boolean(), server_default=_boolean_default_true(), nullable=False),
         sa.ForeignKeyConstraint(["usuario_id"], ["usuario.id"], onupdate="CASCADE", ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("chave_nfe", name="uq_documento_xml_chave_nfe"),

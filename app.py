@@ -42,6 +42,7 @@ from utils.minuta_carregamento import (
     MinutaModuleConfig,
 )
 from core.bootstrap import configure_application_storage
+from core.startup_environment import run_startup_environment_checks
 from core.startup_retention import run_startup_retention_once
 from core.performance import (
     build_performance_report,
@@ -7807,6 +7808,8 @@ def _render_performance_report_panel() -> None:
 def main() -> None:
     _ui_section_stack.clear()
     st.set_page_config(layout="wide")
+    with measure("startup.environment_checks"):
+        run_startup_environment_checks()
     with measure("startup.configure_storage"):
         configure_application_storage()
     with measure("startup.retencao_automatica"):

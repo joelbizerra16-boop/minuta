@@ -26,11 +26,6 @@ def ensure_full_schema() -> None:
 
         _LOGGER.info("persistence.schema_apply method=alembic_upgrade_head dialect=postgresql")
         run_alembic_cli_upgrade("head")
-        _LOGGER.info(
-            "persistence.schema_apply method=create_all_checkfirst dialect=postgresql "
-            "reason=operational_tables_not_fully_versioned"
-        )
-        ModelBase.metadata.create_all(engine, checkfirst=True)
         return
 
     raise RuntimeError(f"Dialecto de banco nao suportado para bootstrap de schema: {dialect}")

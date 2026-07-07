@@ -40,6 +40,9 @@ def test_ensure_full_schema_sqlite_uses_create_all() -> None:
 )
 def test_ensure_full_schema_postgresql_via_alembic() -> None:
     import infrastructure.database as db_module
+    from sqlalchemy import inspect
+
+    from infrastructure.models import Base
 
     postgres_url = os.environ["MINUTA_TEST_POSTGRES_URL"]
     get_settings.cache_clear()
@@ -57,6 +60,11 @@ def test_ensure_full_schema_postgresql_via_alembic() -> None:
     )
     ensure_full_schema()
     assert get_engine_dialect(get_engine()) == "postgresql"
+
+    inspector = inspect(get_engine())
+    tables = set(inspector.get_table_names())
+    expected = set(Base.metadata.tables.keys()) | {"alembic_version"}
+    assert expected.issubset(tables), sorted(expected - tables)
 
     get_engine().dispose()
     db_module._engine = None

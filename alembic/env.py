@@ -24,9 +24,9 @@ def get_url() -> str:
 def run_migrations_offline() -> None:
     settings = get_settings()
     ensure_database_directories(
-        settings.database_url,
         data_root=settings.data_root,
         pdf_storage_dir=settings.pdf_storage_dir,
+        xml_storage_dir=settings.xml_storage_dir,
     )
     url = settings.database_url
     context.configure(
@@ -44,9 +44,9 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     settings = get_settings()
     ensure_database_directories(
-        settings.database_url,
         data_root=settings.data_root,
         pdf_storage_dir=settings.pdf_storage_dir,
+        xml_storage_dir=settings.xml_storage_dir,
     )
     configuration = config.get_section(config.config_ini_section) or {}
     configuration["sqlalchemy.url"] = settings.database_url

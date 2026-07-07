@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import os
-
 """Politica centralizada de retencao e limites de armazenamento (unico ponto de configuracao)."""
 
-RETENTION_DAYS = int(os.getenv("MINUTA_RETENTION_DAYS", "8"))
+from core.settings import get_env_int
+
+RETENTION_DAYS = get_env_int("MINUTA_RETENTION_DAYS", 8)
 
 # Neon PostgreSQL Free — limite operacional oficial (500 MB)
-DATABASE_STORAGE_LIMIT_BYTES = int(
-    os.getenv("MINUTA_DATABASE_LIMIT_BYTES", str(500 * 1024 * 1024))
-)
+DATABASE_STORAGE_LIMIT_BYTES = get_env_int("MINUTA_DATABASE_LIMIT_BYTES", 500 * 1024 * 1024)
 
 RETENTION_POLICY_STATUS = "Ativa"
 

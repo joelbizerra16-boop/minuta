@@ -1,0 +1,30 @@
+{
+  "fase": "N2",
+  "timestamp_utc": "2026-07-07T19:11:16.308278+00:00",
+  "aprovada": false,
+  "bloqueador": "MINUTA_DATABASE_URL nao definida",
+  "configuracao": {},
+  "conexao": {},
+  "ssl": {},
+  "alembic": {},
+  "schema": {},
+  "database_usage": {},
+  "funcional": {},
+  "benchmarks": {},
+  "tempos_ms": {},
+  "riscos": [
+    "Homologacao Neon real nao executada — variavel de ambiente ausente."
+  ],
+  "recomendacoes": [
+    "Copie .env.example para .env e configure a connection string do Neon com sslmode=require."
+  ],
+  "checklist_n3": {
+    "conexao_neon": false,
+    "migrations_aplicadas": false,
+    "bootstrap_ok": false,
+    "modulos_ok": false,
+    "database_usage_ok": false,
+    "schema_equivalente": false,
+    "sem_regressao": false
+  }
+}

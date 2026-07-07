@@ -62,7 +62,13 @@ def upgrade() -> None:
         # Bancos SQLite legados com BIGINT devem ser recriados em desenvolvimento.
         return
 
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+
     for table_name, column_name in _PG_INTEGER_COLUMNS:
+        if table_name not in existing_tables:
+            continue
         op.alter_column(
             table_name,
             column_name,
@@ -76,7 +82,13 @@ def downgrade() -> None:
     if not _is_postgresql():
         return
 
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+
     for table_name, column_name in reversed(_PG_INTEGER_COLUMNS):
+        if table_name not in existing_tables:
+            continue
         op.alter_column(
             table_name,
             column_name,

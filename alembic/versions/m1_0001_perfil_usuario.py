@@ -13,6 +13,18 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _boolean_default_false():
+    if op.get_bind().dialect.name == "postgresql":
+        return sa.text("false")
+    return sa.text("0")
+
+
+def _boolean_default_true():
+    if op.get_bind().dialect.name == "postgresql":
+        return sa.text("true")
+    return sa.text("1")
+
+
 def upgrade() -> None:
     op.create_table(
         "perfil",
@@ -46,8 +58,8 @@ def upgrade() -> None:
         sa.Column("senha_hash", sa.String(length=255), nullable=False),
         sa.Column("perfil_id", sa.Integer(), nullable=False),
         sa.Column("perfil", sa.String(length=20), nullable=False, server_default="OPERADOR"),
-        sa.Column("bloqueado", sa.Boolean(), nullable=False, server_default=sa.text("0")),
-        sa.Column("ativo", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+        sa.Column("bloqueado", sa.Boolean(), nullable=False, server_default=_boolean_default_false()),
+        sa.Column("ativo", sa.Boolean(), nullable=False, server_default=_boolean_default_true()),
         sa.Column("excluido_em", sa.DateTime(timezone=True), nullable=True),
         sa.Column("criado_em", sa.DateTime(timezone=True), server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False),
         sa.Column("atualizado_em", sa.DateTime(timezone=True), server_default=sa.text("(CURRENT_TIMESTAMP)"), nullable=False),

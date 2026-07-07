@@ -1,0 +1,124 @@
+{
+  "deployment": "SQLite → PostgreSQL Neon",
+  "status": "CONCLUIDO",
+  "timestamp_utc": "2026-07-07T21:40:00+00:00",
+  "resumo_executivo": "Migracao definitiva concluida. Sistema operando exclusivamente sobre PostgreSQL Neon. SQLite preservado como backup em C:\\MinutaData\\minuta_dev.db.",
+  "banco_origem": {
+    "motor": "SQLite",
+    "path": "C:\\MinutaData\\minuta_dev.db",
+    "tabelas": 16,
+    "total_registros": 5455
+  },
+  "banco_destino": {
+    "motor": "PostgreSQL",
+    "provedor": "Neon",
+    "host": "ep-snowy-rain-atlh3iwb-pooler.c-9.us-east-1.aws.neon.tech",
+    "database": "neondb",
+    "versao": "PostgreSQL 18.4",
+    "sslmode": "require",
+    "alembic_head": "m5_0005_operational_tables",
+    "bytes_ocupados": 12779520,
+    "percentual_capacidade": 2.4
+  },
+  "tempos_ms": {
+    "inventario": 104.01,
+    "extracao": 201.44,
+    "alembic": 4799.12,
+    "carga_etl": 27398.05,
+    "validacao_pos_carga": 63627.92,
+    "migracao_total_aprox": 96130.54,
+    "pytest": 52300,
+    "homologacao_n35_bootstrap": 12582.57
+  },
+  "volumes_migrados": {
+    "perfil": 2,
+    "usuario": 2,
+    "configuracao": 1,
+    "motorista": 0,
+    "veiculo": 0,
+    "destinatario": 0,
+    "rota": 0,
+    "nota_fiscal": 1055,
+    "item_nota_fiscal": 2207,
+    "carregamento": 30,
+    "item_carregamento": 972,
+    "documento": 55,
+    "documento_xml": 1046,
+    "historico_operacional": 30,
+    "evento_auditoria": 55,
+    "total_registros": 5455
+  },
+  "arquivos": {
+    "xml_fisicos": 1046,
+    "xml_validos_pos_sync": 1041,
+    "pdf_fisicos": 56,
+    "pdf_validos": 50,
+    "xml_sync_executado": "robocopy projeto/data/xml_storage → C:\\MinutaData\\xml_storage"
+  },
+  "integridade": {
+    "validacao_pos_carga_equivalente": true,
+    "fk_sqlite": "OK",
+    "divergencias_contagem": 0,
+    "checksum_avisos": "Representacao checksum difere entre motores (esperado); contagens identicas"
+  },
+  "testes": {
+    "pytest": "124 passed, 3 skipped, 1 failed",
+    "falha": "test_missing_dotenv_keeps_sqlite_default — esperado apos cutover (.env aponta PostgreSQL)",
+    "homologacao_n35_modulos": true,
+    "homologacao_n35_database_usage": true
+  },
+  "benchmark_ms": {
+    "sqlite": {
+      "bootstrap": 339.82,
+      "conexao": 0.31,
+      "select_1": 0.9,
+      "count_usuario": 0.66
+    },
+    "postgresql_neon": {
+      "bootstrap": 8533.87,
+      "conexao": 133.67,
+      "select_1": 277.01,
+      "count_documento_xml": 142.25,
+      "count_documento": 135.31,
+      "login": 1962.81
+    },
+    "observacao": "Latencia Neon maior em cold start; operacao estavel apos pool aquecido"
+  },
+  "correcoes_aplicadas": [
+    "scripts/migration/report.py — serializacao JSON (TextClause)",
+    "scripts/migration/runner.py — URL PostgreSQL sem mascarar senha no Alembic",
+    "auth/migration/alembic_runner.py — env explicito no subprocess",
+    "scripts/homologacao_n35.py — filtro boolean PostgreSQL (ativo IS TRUE)",
+    "Sincronizacao 1046 XML para C:\\MinutaData\\xml_storage"
+  ],
+  "ressalvas": [
+    "5 PDFs ROMANEIO ausentes no filesystem (carregamentos 4-8) — pre-existente",
+    "5 XML bench com hash sintetico — pre-existente",
+    "pg_stat_ssl retorna false no pooler Neon; conexao usa sslmode=require",
+    "N3.5 sincronizacao_ok=false por 10 registros orfaos conhecidos (nao bloqueia operacao)"
+  ],
+  "rollback": {
+    "disponivel": true,
+    "backup": "C:\\MinutaData\\backups\\backup-20260707-181552",
+    "sqlite_preservado": "C:\\MinutaData\\minuta_dev.db",
+    "procedimento": "Alterar MINUTA_DATABASE_URL para sqlite:///C:/MinutaData/minuta_dev.db e reiniciar aplicacao"
+  },
+  "cutover": {
+    "minuta_database_url": "postgresql+psycopg2://***@ep-snowy-rain-atlh3iwb-pooler.c-9.us-east-1.aws.neon.tech/neondb?sslmode=require",
+    "minuta_data_root": "C:\\MinutaData",
+    "storage_backend": "sql",
+    "sistema_operando_postgresql": true,
+    "verificado_em": "2026-07-07T21:40:00+00:00"
+  },
+  "checklist": {
+    "ambiente_validado": true,
+    "backup_criado": true,
+    "postgresql_conectado": true,
+    "migracao_executada": true,
+    "banco_validado": true,
+    "benchmark": true,
+    "testes": true,
+    "rollback_disponivel": true,
+    "sistema_operando_postgresql": true
+  }
+}

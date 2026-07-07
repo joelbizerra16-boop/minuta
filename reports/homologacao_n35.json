@@ -1,0 +1,268 @@
+{
+  "fase": "N3.5",
+  "timestamp_utc": "2026-07-07T21:38:57.844867+00:00",
+  "aprovada": false,
+  "bloqueador": "Um ou mais criterios de homologacao N3.5 nao foram atendidos.",
+  "configuracao": {
+    "driver": "postgresql+psycopg2",
+    "host": "ep-snowy-rain-atlh3iwb-pooler.c-9.us-east-1.aws.neon.tech",
+    "database": "neondb",
+    "dialect": "postgresql",
+    "sslmode": "require"
+  },
+  "auditoria_persistencia": {
+    "mapa": {
+      "xml_gravacao": [
+        "infrastructure/services/documento_xml_service.py::DocumentoXmlService.persist_raw_xml_batch",
+        "app.py::import_xml_upload_batch"
+      ],
+      "xml_leitura": [
+        "infrastructure/services/documento_xml_service.py::DocumentoXmlService.read_xml_bytes",
+        "carregamentos/services/xml_export_service.py::XmlExportService.collect_xmls_for_carregamento"
+      ],
+      "pdf_gravacao": [
+        "carregamentos/services/carregamento_service.py::save_carregamento_with_pdfs",
+        "carregamentos/services/fechamento_service.py::gravar_pdfs_pos_commit"
+      ],
+      "pdf_leitura": [
+        "carregamentos/services/carregamento_service.py::read_document",
+        "carregamentos/pages/consulta.py"
+      ],
+      "download_exportacao": [
+        "utils/document_download_package.py",
+        "app.py::_run_baixar_pdf_pipeline",
+        "carregamentos/integration.py"
+      ],
+      "retencao": [
+        "carregamentos/services/execucao_retencao_service.py",
+        "carregamentos/repository/sql_execucao_retencao_repository.py",
+        "core/startup_retention.py"
+      ],
+      "auditoria": [
+        "infrastructure/repositories/sql/evento_auditoria_repository.py",
+        "carregamentos/repository/sql_auditoria_nf_repository.py"
+      ],
+      "etl": [
+        "scripts/migrate_sqlite_to_neon.py",
+        "scripts/migration/runner.py"
+      ]
+    }
+  },
+  "integridade_xml": {
+    "validos": 1041,
+    "invalidos": [
+      "xml_hash_divergente:id=1042:chave=11111111111111111111111111111111111111111110",
+      "xml_hash_divergente:id=1043:chave=11111111111111111111111111111111111111111111",
+      "xml_hash_divergente:id=1044:chave=11111111111111111111111111111111111111111112",
+      "xml_hash_divergente:id=1045:chave=11111111111111111111111111111111111111111113",
+      "xml_hash_divergente:id=1046:chave=11111111111111111111111111111111111111111114"
+    ],
+    "total_banco": 1046,
+    "total_fs": 1046,
+    "db_rows": 1046
+  },
+  "integridade_pdf": {
+    "validos": 50,
+    "invalidos": [
+      "pdf_sem_arquivo:id=6:carregamento=4",
+      "pdf_sem_arquivo:id=8:carregamento=5",
+      "pdf_sem_arquivo:id=10:carregamento=6",
+      "pdf_sem_arquivo:id=12:carregamento=7",
+      "pdf_sem_arquivo:id=14:carregamento=8"
+    ],
+    "total_banco": 55
+  },
+  "sincronizacao": {
+    "registros_orfaos": [
+      "xml_hash_divergente:id=1042:chave=11111111111111111111111111111111111111111110",
+      "xml_hash_divergente:id=1043:chave=11111111111111111111111111111111111111111111",
+      "xml_hash_divergente:id=1044:chave=11111111111111111111111111111111111111111112",
+      "xml_hash_divergente:id=1045:chave=11111111111111111111111111111111111111111113",
+      "xml_hash_divergente:id=1046:chave=11111111111111111111111111111111111111111114",
+      "pdf_sem_arquivo:id=6:carregamento=4",
+      "pdf_sem_arquivo:id=8:carregamento=5",
+      "pdf_sem_arquivo:id=10:carregamento=6",
+      "pdf_sem_arquivo:id=12:carregamento=7",
+      "pdf_sem_arquivo:id=14:carregamento=8"
+    ],
+    "arquivos_orfaos": [],
+    "total_registros_orfaos": 10,
+    "total_arquivos_orfaos": 0,
+    "sincronizado": false,
+    "xml": {
+      "validos": 1041,
+      "invalidos": [
+        "xml_hash_divergente:id=1042:chave=11111111111111111111111111111111111111111110",
+        "xml_hash_divergente:id=1043:chave=11111111111111111111111111111111111111111111",
+        "xml_hash_divergente:id=1044:chave=11111111111111111111111111111111111111111112",
+        "xml_hash_divergente:id=1045:chave=11111111111111111111111111111111111111111113",
+        "xml_hash_divergente:id=1046:chave=11111111111111111111111111111111111111111114"
+      ],
+      "total_banco": 1046,
+      "total_fs": 1046,
+      "db_rows": 1046
+    },
+    "pdf": {
+      "validos": 50,
+      "invalidos": [
+        "pdf_sem_arquivo:id=6:carregamento=4",
+        "pdf_sem_arquivo:id=8:carregamento=5",
+        "pdf_sem_arquivo:id=10:carregamento=6",
+        "pdf_sem_arquivo:id=12:carregamento=7",
+        "pdf_sem_arquivo:id=14:carregamento=8"
+      ],
+      "total_banco": 55
+    }
+  },
+  "retencao": {
+    "ordem_sql_confirmada": [
+      "evento_auditoria (por carregamento)",
+      "historico_operacional",
+      "documento (PDF metadata)",
+      "item_carregamento",
+      "carregamento",
+      "item_nota_fiscal (orfos)",
+      "nota_fiscal (orfos)",
+      "documento_xml (orfos)",
+      "arquivos PDF (pos-commit)",
+      "arquivos XML (pos-commit)"
+    ],
+    "transacao_unica": true,
+    "arquivos_pos_commit": true,
+    "rollback_em_falha_sql": true,
+    "implementacao": "ExecucaoRetencaoService.executar_retencao + SqlExecucaoRetencaoRepository",
+    "observacao": "Arquivos fisicos removidos somente apos commit da UnitOfWork. Falha SQL reverte banco; falha pos-commit em arquivo e registrada em arquivos_falha."
+  },
+  "funcional": {
+    "fluxos": {
+      "login": {
+        "ok": true
+      },
+      "gestao_dados": {
+        "ok": true
+      },
+      "gestao_retencao": {
+        "ok": true
+      },
+      "simulacao": {
+        "ok": true
+      },
+      "analise_operacional": {
+        "ok": true
+      },
+      "rastreabilidade_nf": {
+        "ok": true
+      },
+      "auditoria_nf": {
+        "ok": true
+      },
+      "usuarios": {
+        "ok": true,
+        "observacao": "validado indiretamente via servicos/SQL sem payload UI"
+      },
+      "importacao_xml": {
+        "ok": true,
+        "observacao": "validado indiretamente via servicos/SQL sem payload UI"
+      },
+      "importacao_excel": {
+        "ok": true,
+        "observacao": "validado indiretamente via servicos/SQL sem payload UI"
+      },
+      "processamento": {
+        "ok": true,
+        "observacao": "validado indiretamente via servicos/SQL sem payload UI"
+      },
+      "minuta": {
+        "ok": true,
+        "observacao": "validado indiretamente via servicos/SQL sem payload UI"
+      },
+      "romaneio": {
+        "ok": true,
+        "observacao": "validado indiretamente via servicos/SQL sem payload UI"
+      },
+      "complementacao": {
+        "ok": true,
+        "observacao": "validado indiretamente via servicos/SQL sem payload UI"
+      },
+      "reentrega": {
+        "ok": true,
+        "observacao": "validado indiretamente via servicos/SQL sem payload UI"
+      },
+      "reimpressao": {
+        "ok": true,
+        "observacao": "validado indiretamente via servicos/SQL sem payload UI"
+      },
+      "exportacao_xml": {
+        "ok": true,
+        "observacao": "validado indiretamente via servicos/SQL sem payload UI"
+      },
+      "download_pdf": {
+        "ok": true,
+        "observacao": "validado indiretamente via servicos/SQL sem payload UI"
+      },
+      "logout": {
+        "ok": true,
+        "observacao": "validado indiretamente via servicos/SQL sem payload UI"
+      }
+    },
+    "tempos_ms": {
+      "login": 2015.44,
+      "gestao_dados": 1103.88,
+      "gestao_retencao": 551.75,
+      "simulacao": 545.38,
+      "analise_operacional": 0.02,
+      "rastreabilidade_nf": 551.61,
+      "auditoria_nf": 0.01
+    },
+    "todos_ok": true
+  },
+  "database_usage": {
+    "motor": "PostgreSQL",
+    "bytes_ocupados": 12779520,
+    "bytes_limite": 524288000,
+    "bytes_disponiveis": 511508480,
+    "utilizacao_percentual": 2.4,
+    "medicao_direta": true,
+    "observacao": "Medicao via pg_database_size(current_database()).",
+    "usa_pg_database_size": true
+  },
+  "benchmarks": {
+    "neon": {
+      "bootstrap_ms": 8533.87,
+      "conexao_ms": 133.67,
+      "select_1": 277.01,
+      "count_documento_xml": 142.25,
+      "count_documento": 135.31,
+      "login_ms": 1962.81
+    }
+  },
+  "seguranca": {
+    "dialect": "postgresql",
+    "driver": "postgresql+psycopg2",
+    "sslmode": "require",
+    "pool_pre_ping": true,
+    "ssl_ativo": false,
+    "fk_count": 20,
+    "index_count": 100
+  },
+  "tempos_ms": {
+    "bootstrap": 12582.57,
+    "database_usage": 572.46
+  },
+  "correcoes": [],
+  "riscos": [
+    "Sincronizacao banco x storage: 10 registros orfaos, 0 arquivos orfaos."
+  ],
+  "checklist": {
+    "postgresql_funcionando": true,
+    "modulos_funcionando": true,
+    "xml_acessiveis": true,
+    "pdfs_acessiveis": true,
+    "sincronizacao_ok": false,
+    "database_usage_ok": true,
+    "ssl_ativo": false,
+    "retencao_auditada": true,
+    "sqlite_contingencia": true,
+    "sem_regressao_codigo": true
+  }
+}

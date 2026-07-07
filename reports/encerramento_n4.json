@@ -1,0 +1,46 @@
+{
+  "fase": "N4_ENCERRAMENTO",
+  "status": "CONCLUIDO",
+  "timestamp_utc": "2026-07-07T22:05:00+00:00",
+  "banco_oficial": {
+    "motor": "PostgreSQL",
+    "provedor": "Neon",
+    "database": "neondb",
+    "versao": "PostgreSQL 18.4",
+    "alembic_head": "m5_0005_operational_tables",
+    "host": "ep-snowy-rain-atlh3iwb-pooler.c-9.us-east-1.aws.neon.tech"
+  },
+  "sqlite_contingencia": "C:\\MinutaData\\minuta_dev.db",
+  "backup": "C:\\MinutaData\\backups\\backup-20260707-181552",
+  "migracao": {
+    "origem_registros": 5455,
+    "destino_registros_dominio": 5455,
+    "tabelas": 16,
+    "foreign_keys": 20,
+    "indexes": 100,
+    "documento_xml": 1046,
+    "documento": 55,
+    "carregamento": 30,
+    "xml_filesystem": 1046,
+    "tempo_migracao_ms": 96130,
+    "validacao_pos_carga_equivalente": true
+  },
+  "testes": {
+    "pytest": "125 passed, 3 skipped",
+    "homologacao_n4_audit": "APROVADA",
+    "environment_diagnose": "AMBIENTE PRONTO PARA MIGRACAO"
+  },
+  "seguranca": {
+    "env_gitignored": true,
+    "credenciais_no_repositorio": false,
+    "senha_em_arquivos_versionados": false
+  },
+  "tag": "v2.0.0-postgresql",
+  "pendencias": [
+    "5 PDFs ROMANEIO ausentes (pre-existente)",
+    "5 XML bench hash sintetico",
+    "Rotacionar senha Neon (exposta em sessao de deploy)",
+    "Tabela minuta_neon_probe de homologacao (1 registro)"
+  ],
+  "proxima_fase": "P1 — Otimizacao de Performance e Estabilizacao Pos-Migracao"
+}

@@ -17,6 +17,9 @@ def test_derive_storage_paths_from_sqlite_url() -> None:
 
 
 def test_derive_storage_paths_from_postgresql_url() -> None:
+    import os
+
+    os.environ.pop("MINUTA_DATA_ROOT", None)
     data_root, pdf_dir, xml_dir = derive_storage_paths("postgresql://user:pass@localhost:5432/minuta")
     assert data_root == (Path.cwd() / "data").resolve()
     assert pdf_dir == data_root / "documentos"

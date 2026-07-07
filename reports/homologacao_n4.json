@@ -1,0 +1,56 @@
+{
+  "fase": "N4",
+  "timestamp_utc": "2026-07-07T22:05:11.590773+00:00",
+  "aprovada": false,
+  "bloqueador": "InvalidRequestError: This connection has already initialized a SQLAlchemy Transaction() object via begin() or autobegin; can't call begin() here unless rollback() or commit() is called first.",
+  "etapas": {
+    "1_auditoria": {
+      "runtime_depende_exclusivamente_sqlite": false,
+      "runtime_sqlite_condicional": [
+        "infrastructure/database.py::PRAGMA foreign_keys (somente SQLite)",
+        "infrastructure/services/database_usage_service.py::PRAGMA fallback (somente SQLite)"
+      ],
+      "scripts_dev_sqlite": [
+        "scripts/rebuild_sqlite_database.py",
+        "scripts/pragma_all_tables.py",
+        "scripts/audit_sqlite_schema.py"
+      ],
+      "componentes_portaveis": [
+        "infrastructure/persistence/sql_compat.py",
+        "infrastructure/schema.py (Alembic PG / create_all SQLite)",
+        "infrastructure/database.py::get_engine() fonte unica",
+        "core/settings.py::MINUTA_DATABASE_URL"
+      ],
+      "engine_unico": "infrastructure/database.py::configure_database + get_engine",
+      "unit_of_work": "infrastructure/unit_of_work.py",
+      "database_usage_pg": "pg_database_size(current_database())",
+      "alembic_head": "m5_0005_operational_tables",
+      "psycopg2": "requirements.txt::psycopg2-binary",
+      "dotenv": ".env via scripts (nao em runtime obrigatorio)"
+    },
+    "13_testes": {
+      "exit_code": 0,
+      "duracao_ms": 57759.14,
+      "resumo": "125 passed, 3 skipped, 46 warnings in 55.09s",
+      "ok": true
+    }
+  },
+  "banco": {},
+  "migracao": {},
+  "estrutura": {},
+  "performance": {},
+  "compatibilidade": {},
+  "arquivos_alterados": [
+    "scripts/homologacao_n4.py (novo orquestrador N4)"
+  ],
+  "testes": {
+    "exit_code": 0,
+    "duracao_ms": 57759.14,
+    "resumo": "125 passed, 3 skipped, 46 warnings in 55.09s",
+    "ok": true
+  },
+  "riscos": [
+    "This connection has already initialized a SQLAlchemy Transaction() object via begin() or autobegin; can't call begin() here unless rollback() or commit() is called first."
+  ],
+  "checklist": {}
+}

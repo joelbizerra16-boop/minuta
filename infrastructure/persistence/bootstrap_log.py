@@ -30,7 +30,7 @@ def log_schema_strategy(dialect: str) -> None:
     if normalized == "sqlite":
         strategy = "create_all"
     elif normalized == "postgresql":
-        strategy = "alembic_upgrade_head+create_all_checkfirst"
+        strategy = "alembic_upgrade_head"
     else:
         strategy = "unsupported"
     _LOGGER.info(

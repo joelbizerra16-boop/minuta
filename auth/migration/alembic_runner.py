@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -39,6 +40,7 @@ def run_alembic_cli_upgrade(revision: str = "head") -> None:
         capture_output=True,
         text=True,
         check=False,
+        env=os.environ.copy(),
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
