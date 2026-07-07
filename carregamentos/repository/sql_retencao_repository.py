@@ -12,6 +12,8 @@ from infrastructure.models.documento import DocumentoORM
 from infrastructure.models.documento_xml import DocumentoXmlORM
 from infrastructure.models.evento_auditoria import EventoAuditoriaORM
 from infrastructure.models.historico import HistoricoOperacionalORM
+from infrastructure.persistence.engine_info import get_dialect_name
+from infrastructure.persistence.sql_compat import trim_both_zeros
 from infrastructure.unit_of_work import UnitOfWork
 
 
@@ -176,6 +178,10 @@ class SqlRetencaoRepository(RetencaoRepository):
     @staticmethod
     def _contar_itens_nota_fiscal(session: Session, data_corte: date, data_alvo: date | None = None) -> int:
         filtro_data = "AND c.data = :data_alvo" if data_alvo is not None else ""
+        dialect = get_dialect_name(session)
+        trim_ic = trim_both_zeros("ic.numero_nf", dialect=dialect)
+        trim_nf = trim_both_zeros("nf.numero_nf", dialect=dialect)
+        nf_match = f"{trim_ic} = {trim_nf}"
         stmt = text(
             f"""
             SELECT COUNT(*)
@@ -198,7 +204,7 @@ class SqlRetencaoRepository(RetencaoRepository):
                     )
                     OR (
                         TRIM(COALESCE(ic.numero_nf, '')) <> ''
-                        AND TRIM(CAST(ic.numero_nf AS TEXT), '0') = TRIM(CAST(nf.numero_nf AS TEXT), '0')
+                        AND {nf_match}
                     )
                 )
                 INNER JOIN carregamento c ON c.id = ic.carregamento_id

@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy import bindparam, text
 
+from infrastructure.persistence.engine_info import get_dialect_name
+from infrastructure.persistence.sql_compat import trim_both_zeros
 from infrastructure.unit_of_work import UnitOfWork
 
 _EVENTOS_CARREGAMENTOS_SQL = """
@@ -33,7 +35,12 @@ WHERE ea.entidade_tipo = 'carregamento'
 ORDER BY criado_em DESC, carregamento_id DESC
 """
 
-_EXTRATO_NF_SQL = """
+
+def _build_extrato_nf_sql(dialect: str) -> str:
+    trim_ic = trim_both_zeros("ic.numero_nf", dialect=dialect)
+    trim_nr = trim_both_zeros("nr.numero_nf", dialect=dialect)
+    nf_match = f"{trim_ic} = {trim_nr}"
+    return f"""
 WITH nf_ref AS (
     SELECT :numero_nf AS numero_nf, :chave_nfe AS chave_nfe
 ),
@@ -46,7 +53,7 @@ carregamentos_nf AS (
         nr.chave_nfe <> ''
         AND ic.chave_nfe = nr.chave_nfe
     ) OR (
-        TRIM(CAST(ic.numero_nf AS TEXT), '0') = TRIM(CAST(nr.numero_nf AS TEXT), '0')
+        {nf_match}
     )
 ),
 rota_nf AS (
@@ -61,7 +68,7 @@ rota_nf AS (
         nr.chave_nfe <> ''
         AND ic.chave_nfe = nr.chave_nfe
     ) OR (
-        TRIM(CAST(ic.numero_nf AS TEXT), '0') = TRIM(CAST(nr.numero_nf AS TEXT), '0')
+        {nf_match}
     )
     GROUP BY ic.carregamento_id
 ),
@@ -206,8 +213,9 @@ class SqlAuditoriaNfRepository:
             return []
 
         with UnitOfWork() as uow:
+            dialect = get_dialect_name(uow.session)
             rows = uow.session.execute(
-                text(_EXTRATO_NF_SQL),
+                text(_build_extrato_nf_sql(dialect)),
                 {"numero_nf": numero, "chave_nfe": chave},
             ).mappings().all()
 

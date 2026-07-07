@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 
 from core.bootstrap import configure_application_storage
 
-configure_application_storage(ROOT / "data")
+configure_application_storage()
 
 from app import (
     SEPARACAO_JSON_PATH,

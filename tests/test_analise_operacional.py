@@ -23,6 +23,7 @@ def _setup_sql_env(data_dir: Path) -> None:
         database_url=os.environ["MINUTA_DATABASE_URL"],
         data_root=data_dir,
         pdf_storage_dir=data_dir / "documentos",
+        xml_storage_dir=data_dir / "xml_storage",
     )
     ensure_full_schema()
     configure_auth_storage(data_dir)

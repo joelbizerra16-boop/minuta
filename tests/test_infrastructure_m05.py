@@ -28,6 +28,7 @@ def test_schema_tables_and_fk_policies() -> None:
             database_url=f"sqlite:///{db_path.as_posix()}",
             data_root=data_root,
             pdf_storage_dir=data_root / "documentos",
+            xml_storage_dir=data_root / "xml_storage",
         )
         engine = get_engine()
         Base.metadata.create_all(engine)
@@ -48,6 +49,7 @@ def test_schema_tables_and_fk_policies() -> None:
             "historico_operacional",
             "evento_auditoria",
             "configuracao",
+            "documento_xml",
         }
         assert expected_tables == table_names
 
@@ -82,6 +84,7 @@ def test_schema_tables_and_fk_policies() -> None:
         db_module._session_factory = None
         db_module._data_root = None
         db_module._pdf_storage_dir = None
+        db_module._xml_storage_dir = None
 
     print("schema tables and FK policies OK")
 

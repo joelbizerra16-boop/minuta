@@ -22,9 +22,48 @@ from carregamentos.models.rastreabilidade_nf import (
 )
 from carregamentos.repository.rastreabilidade_nf_repository import RastreabilidadeNfRepository
 from infrastructure.models.constants import DOC_TIPO_MINUTA, DOC_TIPO_ROMANEIO, HISTORICO_EVENTO_ENTREGA_BALCAO, HISTORICO_EVENTO_REENTREGA
+from infrastructure.persistence.engine_info import get_dialect_name
+from infrastructure.persistence.sql_compat import json_array_subquery, trim_both_zeros
 from infrastructure.unit_of_work import UnitOfWork
 
-RASTREABILIDADE_NF_SQL = """
+
+def _build_rastreabilidade_nf_sql(dialect: str) -> str:
+    trim_nf = trim_both_zeros("nf.numero_nf", dialect=dialect)
+    trim_param = trim_both_zeros(":numero_nf", dialect=dialect)
+    trim_ic = trim_both_zeros("ic.numero_nf", dialect=dialect)
+    trim_nr = trim_both_zeros("nr.numero_nf", dialect=dialect)
+    trim_ic_nr2 = trim_both_zeros("ic.numero_nf", dialect=dialect)
+    trim_nr2 = trim_both_zeros("nr2.numero_nf", dialect=dialect)
+
+    historicos_json = json_array_subquery(
+        dialect=dialect,
+        alias="historicos_json",
+        fields=[
+            ("evento", "ho.evento"),
+            ("criado_em", "ho.criado_em"),
+            ("descricao", "COALESCE(ho.descricao, '')"),
+            ("usuario", "hu.usuario"),
+        ],
+        from_sql="""FROM historico_operacional ho
+        LEFT JOIN usuario hu ON hu.id = ho.usuario_id
+        WHERE ho.carregamento_id = c.id""",
+        order_by="ho.criado_em, ho.id",
+    )
+    documentos_json = json_array_subquery(
+        dialect=dialect,
+        alias="documentos_json",
+        fields=[
+            ("tipo", "d.tipo"),
+            ("criado_em", "d.criado_em"),
+            ("usuario", "du.usuario"),
+        ],
+        from_sql="""FROM documento d
+        LEFT JOIN usuario du ON du.id = d.usuario_id
+        WHERE d.carregamento_id = c.id""",
+        order_by="d.criado_em, d.id",
+    )
+
+    return f"""
 WITH nf_ref AS (
     SELECT
         nf.id AS nf_id,
@@ -44,7 +83,7 @@ WITH nf_ref AS (
        OR (:numero_nf IS NOT NULL AND (
             nf.numero_nf = :numero_nf
             OR nf.numero_nf = :numero_nf_raw
-            OR TRIM(CAST(nf.numero_nf AS TEXT), '0') = TRIM(CAST(:numero_nf AS TEXT), '0')
+            OR {trim_nf} = {trim_param}
        ))
     ORDER BY nf.id DESC
     LIMIT 1
@@ -62,7 +101,7 @@ ic_anchor AS (
        OR (:numero_nf IS NOT NULL AND (
             ic.numero_nf = :numero_nf
             OR ic.numero_nf = :numero_nf_raw
-            OR TRIM(CAST(ic.numero_nf AS TEXT), '0') = TRIM(CAST(:numero_nf AS TEXT), '0')
+            OR {trim_ic} = {trim_param}
        ))
     GROUP BY ic.numero_nf, ic.chave_nfe
     ORDER BY MAX(ic.id) DESC
@@ -89,7 +128,7 @@ carregamentos_nf AS (
             (nr.nf_id > 0 AND ic.nota_fiscal_id = nr.nf_id)
             OR (:chave_nfe IS NOT NULL AND ic.chave_nfe = :chave_nfe)
             OR ic.numero_nf = nr.numero_nf
-            OR TRIM(CAST(ic.numero_nf AS TEXT), '0') = TRIM(CAST(nr.numero_nf AS TEXT), '0')
+            OR {trim_ic} = {trim_nr}
       )
 )
 SELECT
@@ -125,38 +164,13 @@ SELECT
           AND (
                 (nr2.nf_id > 0 AND ic.nota_fiscal_id = nr2.nf_id)
                 OR ic.numero_nf = nr2.numero_nf
-                OR TRIM(CAST(ic.numero_nf AS TEXT), '0') = TRIM(CAST(nr2.numero_nf AS TEXT), '0')
+                OR {trim_ic_nr2} = {trim_nr2}
           )
         ORDER BY ic.sequencia, ic.id
         LIMIT 1
     ) AS rota_nf,
-    (
-        SELECT json_group_array(
-            json_object(
-                'evento', ho.evento,
-                'criado_em', ho.criado_em,
-                'descricao', COALESCE(ho.descricao, ''),
-                'usuario', hu.usuario
-            )
-        )
-        FROM historico_operacional ho
-        LEFT JOIN usuario hu ON hu.id = ho.usuario_id
-        WHERE ho.carregamento_id = c.id
-        ORDER BY ho.criado_em, ho.id
-    ) AS historicos_json,
-    (
-        SELECT json_group_array(
-            json_object(
-                'tipo', d.tipo,
-                'criado_em', d.criado_em,
-                'usuario', du.usuario
-            )
-        )
-        FROM documento d
-        LEFT JOIN usuario du ON du.id = d.usuario_id
-        WHERE d.carregamento_id = c.id
-        ORDER BY d.criado_em, d.id
-    ) AS documentos_json
+    {historicos_json},
+    {documentos_json}
 FROM nf_resumo nr
 INNER JOIN carregamentos_nf cn ON 1 = 1
 INNER JOIN carregamento c ON c.id = cn.carregamento_id
@@ -179,8 +193,9 @@ class SqlRastreabilidadeNfRepository(RastreabilidadeNfRepository):
             return None
 
         with UnitOfWork(self._session) as uow:
+            dialect = get_dialect_name(uow.session)
             rows = uow.session.execute(
-                text(RASTREABILIDADE_NF_SQL),
+                text(_build_rastreabilidade_nf_sql(dialect)),
                 {
                     "chave_nfe": chave_nfe,
                     "numero_nf": numero_nf,

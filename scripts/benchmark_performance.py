@@ -22,7 +22,7 @@ def _timed(label: str, func, *args, **kwargs):
 
 
 def main() -> None:
-    configure_application_storage(ROOT / "data")
+    configure_application_storage()
 
     from app import (
         XMLS_PROCESSADOS_JSON_PATH,

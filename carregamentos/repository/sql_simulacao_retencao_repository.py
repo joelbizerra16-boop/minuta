@@ -17,6 +17,7 @@ from infrastructure.models.documento_xml import DocumentoXmlORM
 from infrastructure.models.evento_auditoria import EventoAuditoriaORM
 from infrastructure.models.historico import HistoricoOperacionalORM
 from infrastructure.models.nota_fiscal import ItemNotaFiscalORM
+from infrastructure.persistence.sql_compat import boolean_is_true
 from infrastructure.unit_of_work import UnitOfWork
 
 
@@ -285,7 +286,7 @@ class SqlSimulacaoRetencaoRepository(SimulacaoRetencaoRepository):
                     f"""
                     SELECT dx.id, dx.chave_nfe, dx.caminho_arquivo
                     FROM documento_xml dx
-                    WHERE dx.ativo = 1
+                    WHERE {boolean_is_true("dx.ativo")}
                       AND dx.chave_nfe NOT IN (
                         SELECT DISTINCT TRIM(ic.chave_nfe)
                         FROM item_carregamento ic

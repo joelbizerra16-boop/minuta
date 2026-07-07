@@ -42,6 +42,7 @@ from utils.minuta_carregamento import (
     MinutaModuleConfig,
 )
 from core.bootstrap import configure_application_storage
+from core.startup_retention import run_startup_retention_once
 from core.performance import (
     build_performance_report,
     bump_processed_data_version,
@@ -7807,7 +7808,9 @@ def main() -> None:
     _ui_section_stack.clear()
     st.set_page_config(layout="wide")
     with measure("startup.configure_storage"):
-        configure_application_storage(DATA_DIR)
+        configure_application_storage()
+    with measure("startup.retencao_automatica"):
+        run_startup_retention_once()
     initialize_login_state()
     initialize_navigation_state()
 

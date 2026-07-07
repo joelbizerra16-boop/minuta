@@ -11,6 +11,7 @@ from core.bootstrap import configure_application_storage
 from core.settings import get_settings
 from infrastructure.database import get_engine
 from infrastructure.models.configuracao import ConfiguracaoORM
+from infrastructure.persistence.engine_info import get_sqlite_database_path
 
 
 def main() -> None:
@@ -20,14 +21,15 @@ def main() -> None:
     print(f"data_root: {settings.data_root}")
     print(f"pdf_storage_dir: {settings.pdf_storage_dir}")
 
-    app_data_dir = Path(__file__).resolve().parent.parent / "data"
-    configure_application_storage(app_data_dir)
+    configure_application_storage()
 
     engine = get_engine()
-    sqlite_path = str(engine.url).replace("sqlite:///", "")
-    resolved = Path(sqlite_path).resolve()
-    print(f"\nengine.url: {engine.url}")
+    resolved = get_sqlite_database_path(engine)
+    print(f"\nengine.url: {engine.url.render_as_string(hide_password=True)}")
     print(f"sqlite_file_resolved: {resolved}")
+    if resolved is None:
+        print("file_exists: n/a (nao e SQLite em arquivo)")
+        return
     print(f"file_exists: {resolved.exists()}")
     if resolved.exists():
         stat = resolved.stat()

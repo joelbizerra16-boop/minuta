@@ -27,10 +27,9 @@ def test_bootstrap_configures_database() -> None:
     get_settings.cache_clear()
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
-        os.environ["MINUTA_DATA_ROOT"] = str(tmp_path)
         os.environ["MINUTA_DATABASE_URL"] = f"sqlite:///{(tmp_path / 'boot.db').as_posix()}"
         get_settings.cache_clear()
-        configure_application_storage(tmp_path)
+        configure_application_storage()
         engine = get_engine()
         assert engine is not None
         engine.dispose()

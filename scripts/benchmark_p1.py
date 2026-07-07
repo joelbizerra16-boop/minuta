@@ -19,7 +19,7 @@ def _ms(start: float) -> float:
 
 
 def main() -> None:
-    configure_application_storage(ROOT / "data")
+    configure_application_storage()
     clear_timings()
 
     from carregamentos.bootstrap import (

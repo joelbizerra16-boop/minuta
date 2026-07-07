@@ -8,7 +8,10 @@ import pandas as pd
 
 from auth.bootstrap import configure_auth_storage
 from carregamentos.bootstrap import configure_carregamentos_storage, get_carregamento_service, get_rastreabilidade_nf_service
-from carregamentos.repository.sql_rastreabilidade_nf_repository import RASTREABILIDADE_NF_SQL, SqlRastreabilidadeNfRepository
+from carregamentos.repository.sql_rastreabilidade_nf_repository import (
+    SqlRastreabilidadeNfRepository,
+    _build_rastreabilidade_nf_sql,
+)
 from core.settings import get_settings
 from infrastructure.database import configure_database, get_engine
 from infrastructure.schema import ensure_full_schema
@@ -23,6 +26,7 @@ def _setup_sql_env(data_dir: Path) -> None:
         database_url=os.environ["MINUTA_DATABASE_URL"],
         data_root=data_dir,
         pdf_storage_dir=data_dir / "documentos",
+        xml_storage_dir=data_dir / "xml_storage",
     )
     ensure_full_schema()
     configure_auth_storage(data_dir)
@@ -118,7 +122,7 @@ def test_rastreabilidade_sql_agrega_carregamentos_distintos() -> None:
         assert relatorio.estatisticas is not None
         assert relatorio.estatisticas.total_reentregas == 1
         assert any(item.reentrega for item in relatorio.historico)
-        assert "json_group_array" in RASTREABILIDADE_NF_SQL
+        assert "json_group_array" in _build_rastreabilidade_nf_sql("sqlite")
         print("rastreabilidade sql OK")
 
     _run_test(_case)

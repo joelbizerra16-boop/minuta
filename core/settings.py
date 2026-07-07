@@ -6,6 +6,10 @@ from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 
+from sqlalchemy.engine import make_url
+
+from infrastructure.persistence.sql_compat import normalize_dialect
+
 
 class StorageBackend(str, Enum):
     SQL = "sql"
@@ -14,8 +18,30 @@ class StorageBackend(str, Enum):
 
 
 def _default_database_url() -> str:
-    default_sqlite = Path(os.getenv("MINUTA_DATA_ROOT", r"C:\MinutaData")) / "minuta_dev.db"
-    return f"sqlite:///{default_sqlite.as_posix()}"
+    data_root = (Path.cwd() / "data").resolve()
+    db_path = data_root / "minuta.db"
+    return f"sqlite:///{db_path.as_posix()}"
+
+
+def derive_storage_paths(database_url: str) -> tuple[Path, Path, Path]:
+    """Deriva data_root e diretorios de arquivo a partir de MINUTA_DATABASE_URL."""
+    url = make_url(database_url)
+    driver = normalize_dialect(url.drivername or "")
+
+    if driver == "sqlite":
+        database = str(url.database or "").strip() or ":memory:"
+        if database == ":memory:":
+            data_root = (Path.cwd() / "data").resolve()
+        else:
+            data_root = Path(database).expanduser().resolve().parent
+    else:
+        data_root = (Path.cwd() / "data").resolve()
+
+    return (
+        data_root,
+        data_root / "documentos",
+        data_root / "xml_storage",
+    )
 
 
 @dataclass(frozen=True)
@@ -36,10 +62,8 @@ def get_settings() -> AppSettings:
     except ValueError:
         storage_backend = StorageBackend.SQL
 
-    data_root = Path(os.getenv("MINUTA_DATA_ROOT", r"C:\MinutaData"))
-    pdf_storage_dir = Path(os.getenv("MINUTA_PDF_STORAGE_DIR", str(data_root / "documentos")))
-    xml_storage_dir = Path(os.getenv("MINUTA_XML_STORAGE_DIR", str(data_root / "xml_storage")))
     database_url = str(os.getenv("MINUTA_DATABASE_URL", _default_database_url()) or _default_database_url()).strip()
+    data_root, pdf_storage_dir, xml_storage_dir = derive_storage_paths(database_url)
     echo_sql = str(os.getenv("MINUTA_SQL_ECHO", "0")).strip().lower() in {"1", "true", "yes"}
 
     return AppSettings(

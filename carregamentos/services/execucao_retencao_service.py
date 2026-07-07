@@ -91,6 +91,7 @@ class ExecucaoRetencaoService:
         usuario_nome: str,
         ip_origem: str | None = None,
         referencia: date | None = None,
+        origem: str = "manual",
     ) -> ResultadoRetencao:
         inicio = time.perf_counter()
         executado_em = datetime.now(timezone.utc)
@@ -212,16 +213,17 @@ class ExecucaoRetencaoService:
                 arquivos_xml_planejados = list(compartilhados.caminhos_xml)
 
                 audit_repo = SqlEventoAuditoriaRepository(session)
+                rotulo_origem = "automatica" if origem == "automatica" else "manual"
                 audit_repo.append(
                     EventoAuditoriaRecord(
                         id=0,
                         categoria=AUDIT_CATEGORIA_SISTEMA,
                         evento=AUDIT_EVENTO_RETENCAO_DADOS,
-                        usuario_id=int(usuario_id),
+                        usuario_id=int(usuario_id) if int(usuario_id) > 0 else None,
                         entidade_tipo="retencao_operacional",
                         entidade_id=None,
                         descricao=(
-                            f"Retencao manual executada por {usuario_nome}: "
+                            f"Retencao {rotulo_origem} executada por {usuario_nome}: "
                             f"{len(confirmacao.carregamento_ids)} carregamento(s) removido(s)."
                         ),
                         metadados_json=SqlEventoAuditoriaRepository.build_metadados(
@@ -233,6 +235,7 @@ class ExecucaoRetencaoService:
                             historicos=totais["historicos"],
                             espaco_recuperado_bytes=espaco_planejado,
                             resultado="SUCESSO",
+                            origem=rotulo_origem,
                         ),
                         ip_origem=ip_origem,
                     )

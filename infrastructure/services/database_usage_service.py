@@ -3,13 +3,18 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from core.retention_policy import DATABASE_STORAGE_LIMIT_BYTES
 from infrastructure.database import get_engine
+from infrastructure.persistence.engine_info import (
+    get_engine_dialect,
+    get_sqlite_database_path,
+    is_postgresql_engine,
+    is_sqlite_engine,
+)
 from infrastructure.unit_of_work import UnitOfWork
 
 _LOGGER = logging.getLogger("minuta.database_usage")
@@ -53,12 +58,14 @@ class DatabaseUsageService:
                 observacao="Banco de dados ainda nao configurado para medicao.",
             )
 
-        driver = self._normalizar_driver(engine)
+        dialect = get_engine_dialect(engine)
+        driver = str(engine.url.drivername or "").strip()
         database = str(engine.url.database or "").strip()
         engine_url = engine.url.render_as_string(hide_password=True)
 
         _LOGGER.info(
-            "database_usage.inicio driver=%s engine_url=%s engine_database=%s limite_bytes=%s",
+            "database_usage.inicio dialect=%s driver=%s engine_url=%s engine_database=%s limite_bytes=%s",
+            dialect,
             driver,
             engine_url,
             database,
@@ -66,30 +73,32 @@ class DatabaseUsageService:
         )
 
         try:
-            if driver == "postgresql":
+            if is_postgresql_engine(engine):
                 resultado = self._medir_postgresql(engine, limite)
-            elif driver == "sqlite":
+            elif is_sqlite_engine(engine):
                 resultado = self._medir_sqlite(engine, limite)
             else:
                 _LOGGER.error(
-                    "database_usage.driver_nao_suportado driver=%s engine_url=%s engine_database=%s",
+                    "database_usage.driver_nao_suportado dialect=%s driver=%s engine_url=%s engine_database=%s",
+                    dialect,
                     driver,
                     engine_url,
                     database,
                 )
                 resultado = UsoBancoDados(
-                    motor=driver or "Desconhecido",
+                    motor=dialect or "Desconhecido",
                     bytes_ocupados=None,
                     bytes_limite=limite,
                     bytes_disponiveis=None,
                     utilizacao_percentual=None,
                     medicao_direta=False,
                     rotulo_ocupacao="Espaco ocupado",
-                    observacao=f"Motor de banco nao suportado para medicao: {driver or 'desconhecido'}.",
+                    observacao=f"Motor de banco nao suportado para medicao: {dialect or 'desconhecido'}.",
                 )
         except Exception:
             _LOGGER.exception(
-                "database_usage.falha driver=%s engine_url=%s engine_database=%s",
+                "database_usage.falha dialect=%s driver=%s engine_url=%s engine_database=%s",
+                dialect,
                 driver,
                 engine_url,
                 database,
@@ -98,9 +107,9 @@ class DatabaseUsageService:
 
         duracao_ms = (time.perf_counter() - inicio) * 1000.0
         _LOGGER.info(
-            "database_usage.concluido driver=%s metodo=%s bytes_ocupados=%s bytes_livres=%s "
+            "database_usage.concluido dialect=%s metodo=%s bytes_ocupados=%s bytes_livres=%s "
             "percentual=%s duracao_ms=%.2f observacao=%s",
-            driver,
+            dialect,
             resultado.rotulo_ocupacao,
             resultado.bytes_ocupados,
             resultado.bytes_disponiveis,
@@ -110,14 +119,8 @@ class DatabaseUsageService:
         )
         return resultado
 
-    @staticmethod
-    def _normalizar_driver(engine: Engine) -> str:
-        driver = str(engine.url.drivername or "").strip().lower()
-        if "+" in driver:
-            driver = driver.split("+", 1)[0]
-        return driver
-
     def _medir_postgresql(self, engine: Engine, limite: int) -> UsoBancoDados:
+        consulta_inicio = time.perf_counter()
         _LOGGER.info(
             "database_usage.postgresql metodo=pg_database_size engine_database=%s",
             engine.url.database,
@@ -126,6 +129,12 @@ class DatabaseUsageService:
             bytes_ocupados = int(
                 uow.session.scalar(text("SELECT pg_database_size(current_database())")) or 0
             )
+        consulta_ms = (time.perf_counter() - consulta_inicio) * 1000.0
+        _LOGGER.info(
+            "database_usage.postgresql_query duracao_ms=%.2f bytes=%s",
+            consulta_ms,
+            bytes_ocupados,
+        )
 
         return self._build_result(
             motor="PostgreSQL",
@@ -138,30 +147,28 @@ class DatabaseUsageService:
 
     def _medir_sqlite(self, engine: Engine, limite: int) -> UsoBancoDados:
         database = str(engine.url.database or "").strip()
+        db_file = get_sqlite_database_path(engine)
         metodo = "sqlite_arquivo"
 
-        if database and database != ":memory:":
-            db_file = Path(database)
-            if not db_file.is_absolute():
-                db_file = db_file.resolve()
-            if db_file.is_file():
-                bytes_ocupados = int(db_file.stat().st_size)
-                _LOGGER.info(
-                    "database_usage.sqlite metodo=%s engine_database=%s arquivo=%s bytes=%s",
-                    metodo,
-                    database,
-                    db_file,
-                    bytes_ocupados,
-                )
-                return self._build_result(
-                    motor="SQLite",
-                    bytes_ocupados=bytes_ocupados,
-                    limite=limite,
-                    medicao_direta=False,
-                    rotulo="Espaco ocupado estimado",
-                    observacao="Medicao baseada no arquivo SQLite referenciado pelo Engine.",
-                )
+        if db_file is not None and db_file.is_file():
+            bytes_ocupados = int(db_file.stat().st_size)
+            _LOGGER.info(
+                "database_usage.sqlite metodo=%s engine_database=%s arquivo=%s bytes=%s",
+                metodo,
+                database,
+                db_file,
+                bytes_ocupados,
+            )
+            return self._build_result(
+                motor="SQLite",
+                bytes_ocupados=bytes_ocupados,
+                limite=limite,
+                medicao_direta=False,
+                rotulo="Espaco ocupado estimado",
+                observacao="Medicao baseada no arquivo SQLite referenciado pelo Engine.",
+            )
 
+        if db_file is not None:
             _LOGGER.warning(
                 "database_usage.sqlite arquivo_indisponivel engine_database=%s arquivo_resolvido=%s exists=%s",
                 database,
@@ -170,12 +177,15 @@ class DatabaseUsageService:
             )
 
         metodo = "sqlite_pragma"
+        consulta_inicio = time.perf_counter()
         bytes_ocupados = self._medir_sqlite_via_pragma(engine)
+        consulta_ms = (time.perf_counter() - consulta_inicio) * 1000.0
         _LOGGER.info(
-            "database_usage.sqlite metodo=%s engine_database=%s bytes=%s",
+            "database_usage.sqlite metodo=%s engine_database=%s bytes=%s duracao_ms=%.2f",
             metodo,
             database or ":memory:",
             bytes_ocupados,
+            consulta_ms,
         )
         return self._build_result(
             motor="SQLite",
