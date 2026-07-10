@@ -13,10 +13,25 @@ DEFAULT_ADMIN_PASSWORD = "admin123"
 DEFAULT_ADMIN_NAME = "Administrador"
 
 _repository: UsuarioRepository | None = None
+_AUTH_STORAGE_CONFIGURED = False
+_CONFIGURED_DATA_ROOT: Path | None = None
+
+
+def reset_auth_bootstrap_state() -> None:
+    """Utilitario de teste: permite reconfigurar auth storage."""
+    global _repository, _AUTH_STORAGE_CONFIGURED, _CONFIGURED_DATA_ROOT
+    _repository = None
+    _AUTH_STORAGE_CONFIGURED = False
+    _CONFIGURED_DATA_ROOT = None
+    get_auth_service.cache_clear()
+    get_usuario_service.cache_clear()
 
 
 def configure_auth_storage(data_dir: Path) -> UsuarioRepository:
-    global _repository
+    global _repository, _AUTH_STORAGE_CONFIGURED, _CONFIGURED_DATA_ROOT
+    if _AUTH_STORAGE_CONFIGURED and _CONFIGURED_DATA_ROOT == data_dir and _repository is not None:
+        return _repository
+
     _ = data_dir
     repository = SqlUsuarioRepository()
     repository.ensure_default_admin(
@@ -25,6 +40,8 @@ def configure_auth_storage(data_dir: Path) -> UsuarioRepository:
         nome=DEFAULT_ADMIN_NAME,
     )
     _repository = repository
+    _AUTH_STORAGE_CONFIGURED = True
+    _CONFIGURED_DATA_ROOT = data_dir
     return _repository
 
 

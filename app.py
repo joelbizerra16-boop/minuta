@@ -2386,6 +2386,7 @@ def persist_xml_records(
         if is_separacao_group_locked(records)
     }
     storage_lookup: dict[str, dict[str, object]] = {}
+    delta_records: list[dict[str, object]] = []
 
     for existing_record in existing_records:
         normalized_record = serialize_xml_record(existing_record)
@@ -2406,11 +2407,13 @@ def persist_xml_records(
         current_record = storage_lookup.get(identity)
         if current_record is None:
             storage_lookup[identity] = serialized
+            delta_records.append(serialized)
             summary["novas"] += 1
             continue
 
         if should_replace_xml_record(current_record, serialized):
             storage_lookup[identity] = serialized
+            delta_records.append(serialized)
             summary["atualizadas"] += 1
             issues.append(f"NF {serialized.get('NF', '--')} atualizada pelo evento/XML mais recente.")
         else:
@@ -2418,8 +2421,8 @@ def persist_xml_records(
             summary["duplicados"] += 1
             issues.append(f"XML duplicado ou desatualizado ignorado: {serialized.get('Arquivo', 'arquivo.xml')}")
 
-    serialized_records = sort_xml_records(list(storage_lookup.values()))
-    SqlXmlRecordRepository().replace_all_records(serialized_records)
+    if delta_records:
+        SqlXmlRecordRepository().upsert_records(delta_records)
     carregar_xmls_processados_records.clear()
 
     summary["processados"] = summary["novas"] + summary["atualizadas"]

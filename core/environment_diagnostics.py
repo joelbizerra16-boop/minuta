@@ -19,6 +19,20 @@ from infrastructure.persistence.sql_compat import normalize_dialect
 
 _LOGGER = logging.getLogger("minuta.environment")
 
+_POSTGRES_VALIDATION_CACHE: dict[str, DiagnosticItem] = {}
+_POSTGRES_VALIDATION_COUNT = 0
+
+
+def get_postgresql_validation_count() -> int:
+    return _POSTGRES_VALIDATION_COUNT
+
+
+def reset_environment_diagnostics_cache() -> None:
+    """Utilitario de teste: limpa cache de validacao PostgreSQL."""
+    global _POSTGRES_VALIDATION_CACHE, _POSTGRES_VALIDATION_COUNT
+    _POSTGRES_VALIDATION_CACHE.clear()
+    _POSTGRES_VALIDATION_COUNT = 0
+
 
 class DiagnosticStatus(str, Enum):
     OK = "ok"
@@ -197,41 +211,75 @@ def validate_active_sqlite_database(settings: AppSettings) -> DiagnosticItem:
 
 
 def validate_postgresql_connection(database_url: str) -> DiagnosticItem:
+    global _POSTGRES_VALIDATION_COUNT
+
+    normalized_url = make_url(database_url).render_as_string(hide_password=False)
+    cached = _POSTGRES_VALIDATION_CACHE.get(normalized_url)
+    if cached is not None:
+        _LOGGER.debug("environment.postgresql_validation skipped url=%s", normalized_url)
+        return cached
+
     driver = normalize_dialect(make_url(database_url).drivername or "")
     if driver != "postgresql":
-        return DiagnosticItem(
+        item = DiagnosticItem(
             label="PostgreSQL",
             status=DiagnosticStatus.SKIPPED,
             message="MINUTA_DATABASE_URL nao aponta para PostgreSQL.",
         )
+        _POSTGRES_VALIDATION_CACHE[normalized_url] = item
+        return item
 
     try:
         import psycopg2  # noqa: F401
     except ImportError:
-        return DiagnosticItem(
+        item = DiagnosticItem(
             label="PostgreSQL",
             status=DiagnosticStatus.ERROR,
             message="Driver PostgreSQL ausente (psycopg2).",
         )
+        _POSTGRES_VALIDATION_CACHE[normalized_url] = item
+        return item
+
+    _POSTGRES_VALIDATION_COUNT += 1
+
+    try:
+        from infrastructure.database import get_configured_database_url, get_engine, is_database_initialized
+
+        if is_database_initialized() and get_configured_database_url() == normalized_url:
+            with get_engine().connect() as connection:
+                connection.execute(text("SELECT 1"))
+            item = DiagnosticItem(
+                label="PostgreSQL",
+                status=DiagnosticStatus.OK,
+                message="Conexao PostgreSQL validada.",
+            )
+            _POSTGRES_VALIDATION_CACHE[normalized_url] = item
+            return item
+    except Exception:
+        pass
 
     engine = create_engine(database_url, future=True, pool_pre_ping=True)
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
     except Exception as exc:
-        return DiagnosticItem(
+        item = DiagnosticItem(
             label="PostgreSQL",
             status=DiagnosticStatus.ERROR,
             message=_friendly_database_error(exc),
         )
+        _POSTGRES_VALIDATION_CACHE[normalized_url] = item
+        return item
     finally:
         engine.dispose()
 
-    return DiagnosticItem(
+    item = DiagnosticItem(
         label="PostgreSQL",
         status=DiagnosticStatus.OK,
         message="Conexao PostgreSQL validada.",
     )
+    _POSTGRES_VALIDATION_CACHE[normalized_url] = item
+    return item
 
 
 def _check_alembic_cli() -> DiagnosticItem:

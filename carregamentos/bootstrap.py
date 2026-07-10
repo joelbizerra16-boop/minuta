@@ -28,10 +28,40 @@ _gestao_dados_service: GestaoDadosService | None = None
 _gestao_capacidade_service: GestaoCapacidadeService | None = None
 _simulacao_retencao_service: SimulacaoRetencaoService | None = None
 _execucao_retencao_service: ExecucaoRetencaoService | None = None
+_CARREGAMENTOS_STORAGE_CONFIGURED = False
+_CONFIGURED_DATA_ROOT: Path | None = None
+
+
+def reset_carregamentos_bootstrap_state() -> None:
+    """Utilitario de teste: permite reconfigurar services de carregamentos."""
+    global _repository, _fechamento_service, _analise_operacional_service
+    global _historico_carregamento_service, _gestao_dados_service, _gestao_capacidade_service
+    global _simulacao_retencao_service, _execucao_retencao_service
+    global _CARREGAMENTOS_STORAGE_CONFIGURED, _CONFIGURED_DATA_ROOT
+
+    _repository = None
+    _fechamento_service = None
+    _analise_operacional_service = None
+    _historico_carregamento_service = None
+    _gestao_dados_service = None
+    _gestao_capacidade_service = None
+    _simulacao_retencao_service = None
+    _execucao_retencao_service = None
+    _CARREGAMENTOS_STORAGE_CONFIGURED = False
+    _CONFIGURED_DATA_ROOT = None
+    get_carregamento_service.cache_clear()
+    get_xml_export_service.cache_clear()
+    get_rastreabilidade_nf_service.cache_clear()
 
 
 def configure_carregamentos_storage(data_dir: Path) -> CarregamentoRepository:
-    global _repository, _fechamento_service, _analise_operacional_service, _historico_carregamento_service, _gestao_dados_service, _gestao_capacidade_service, _simulacao_retencao_service, _execucao_retencao_service
+    global _repository, _fechamento_service, _analise_operacional_service, _historico_carregamento_service
+    global _gestao_dados_service, _gestao_capacidade_service, _simulacao_retencao_service
+    global _execucao_retencao_service, _CARREGAMENTOS_STORAGE_CONFIGURED, _CONFIGURED_DATA_ROOT
+
+    if _CARREGAMENTOS_STORAGE_CONFIGURED and _CONFIGURED_DATA_ROOT == data_dir and _repository is not None:
+        return _repository
+
     from carregamentos.services.execucao_retencao_service import ExecucaoRetencaoService
     from carregamentos.services.gestao_capacidade_service import GestaoCapacidadeService
     from carregamentos.services.gestao_dados_service import GestaoDadosService
@@ -60,6 +90,8 @@ def configure_carregamentos_storage(data_dir: Path) -> CarregamentoRepository:
         execucao_service=_execucao_retencao_service,
     )
     _gestao_dados_service._capacidade_service = _gestao_capacidade_service
+    _CARREGAMENTOS_STORAGE_CONFIGURED = True
+    _CONFIGURED_DATA_ROOT = data_dir
     return _repository
 
 

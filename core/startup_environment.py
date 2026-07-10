@@ -15,6 +15,15 @@ from core.settings import reset_settings_cache
 _LOGGER = logging.getLogger("minuta.startup.environment")
 
 _DOTENV_BOOTSTRAPPED = False
+_ENVIRONMENT_VALIDATED = False
+_CACHED_ENVIRONMENT_REPORT: EnvironmentDiagnosticReport | None = None
+
+
+def reset_startup_environment_cache() -> None:
+    """Utilitario de teste: permite reexecutar diagnostico de ambiente."""
+    global _ENVIRONMENT_VALIDATED, _CACHED_ENVIRONMENT_REPORT
+    _ENVIRONMENT_VALIDATED = False
+    _CACHED_ENVIRONMENT_REPORT = None
 
 
 def bootstrap_environment_from_dotenv() -> None:
@@ -39,11 +48,20 @@ def run_startup_environment_checks() -> EnvironmentDiagnosticReport:
     Nao executa migrations, ETL nem altera banco.
     Nunca propaga excecoes para a interface do usuario.
     """
+    global _ENVIRONMENT_VALIDATED, _CACHED_ENVIRONMENT_REPORT
+
     bootstrap_environment_from_dotenv()
+    if _ENVIRONMENT_VALIDATED and _CACHED_ENVIRONMENT_REPORT is not None:
+        _LOGGER.debug("startup.environment_checks skipped reutilizando diagnostico em cache")
+        return _CACHED_ENVIRONMENT_REPORT
+
     try:
-        return log_environment_diagnostics(run_environment_diagnostics(reload_settings=False))
+        report = log_environment_diagnostics(run_environment_diagnostics(reload_settings=False))
     except Exception:
         _LOGGER.exception("Falha ao executar diagnostico do ambiente; inicializacao continua.")
         report = EnvironmentDiagnosticReport()
         report.overall_status = "DIAGNOSTICO INDISPONIVEL — inicializacao continua em modo padrao"
-        return report
+
+    _ENVIRONMENT_VALIDATED = True
+    _CACHED_ENVIRONMENT_REPORT = report
+    return report
