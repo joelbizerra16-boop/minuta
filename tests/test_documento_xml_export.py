@@ -58,6 +58,11 @@ def test_extract_chave_from_bytes() -> None:
 
 
 def test_persist_raw_xml_batch_single_commit(xml_env: Path) -> None:
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session
+
+    from infrastructure.database import get_engine
+
     service = DocumentoXmlService(storage_dir=xml_env)
     payload_a = _sample_xml(CHAVE, "1426799")
     payload_b = _sample_xml(CHAVE_2, "1426804")
@@ -75,9 +80,21 @@ def test_persist_raw_xml_batch_single_commit(xml_env: Path) -> None:
             chave_nfe=CHAVE_2,
         ),
     ]
+    stats = {"flush": 0, "commit": 0}
+
+    @event.listens_for(Session, "after_flush")
+    def _after_flush(session, flush_context) -> None:
+        stats["flush"] += 1
+
+    @event.listens_for(get_engine(), "commit")
+    def _on_commit(conn) -> None:
+        stats["commit"] += 1
+
     result = service.persist_raw_xml_batch(items, usuario_id=1)
     assert result.saved == 2
     assert len(list(xml_env.glob("*.xml"))) == 2
+    assert stats["flush"] == 1
+    assert stats["commit"] == 1
 
 
 def test_persist_xml_dedup_by_hash(xml_env: Path) -> None:

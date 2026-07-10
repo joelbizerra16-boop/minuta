@@ -175,6 +175,9 @@ class DocumentoXmlService:
                         len(item.file_bytes),
                         safe_name,
                     )
+
+                if saved > 0:
+                    uow.session.flush()
         except Exception as exc:
             failures = max(failures, len(prepared) - reused - saved)
             issues.append(f"Falha na persistencia documental dos XMLs: {exc}")

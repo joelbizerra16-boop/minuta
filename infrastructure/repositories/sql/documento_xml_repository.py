@@ -86,13 +86,12 @@ class SqlDocumentoXmlRepository(DocumentoXmlRepository):
         row.tamanho = int(record.tamanho)
         row.usuario_id = record.usuario_id
         row.ativo = bool(record.ativo)
-        self._session.flush()
         return self._to_record(row)
 
     @staticmethod
     def _to_record(row: DocumentoXmlORM) -> DocumentoXmlRecord:
         return DocumentoXmlRecord(
-            id=int(row.id),
+            id=int(row.id or 0),
             chave_nfe=row.chave_nfe,
             numero_nf=row.numero_nf,
             nome_arquivo=row.nome_arquivo,
