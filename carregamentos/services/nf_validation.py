@@ -89,12 +89,34 @@ class NfHistoricoValidator:
     def __init__(self, repository: CarregamentoRepository):
         self._repository = repository
 
+    @staticmethod
+    def _identidades_para_consulta(
+        identidades: list[NfLoteIdentidade],
+    ) -> tuple[set[str], set[str]]:
+        chaves: set[str] = set()
+        numeros: set[str] = set()
+        for identidade in identidades:
+            chave = normalize_chave_nfe(identidade.chave_nfe)
+            nf_norm = normalize_nf_number(identidade.nf)
+            nf_raw = str(identidade.nf or "").strip()
+            if chave:
+                chaves.add(chave)
+            if nf_norm:
+                numeros.add(nf_norm)
+            if nf_raw:
+                numeros.add(nf_raw)
+        return chaves, numeros
+
     def validar_conflitos_do_lote(self, processed_df: pd.DataFrame) -> list[NfHistoricoConflito]:
         identidades = extrair_identidades_nf_do_lote(processed_df)
         if not identidades:
             return []
 
-        carregamentos = self._repository.list_all()
+        chaves, numeros = self._identidades_para_consulta(identidades)
+        carregamentos = self._repository.list_by_item_identidades(
+            chaves_nfe=chaves,
+            numeros_nf=numeros,
+        )
         por_chave, por_nf = _montar_indice_conflitos(carregamentos)
 
         conflitos: list[NfHistoricoConflito] = []
@@ -120,7 +142,12 @@ class NfHistoricoValidator:
 
     def _buscar_conflitos(self, chave_nfe: str, nf: str) -> list[NfHistoricoConflito]:
         """Compatibilidade com chamadas unitárias legadas."""
-        carregamentos = self._repository.list_all()
+        identidade = NfLoteIdentidade(nf=str(nf or ""), chave_nfe=normalize_chave_nfe(chave_nfe))
+        chaves, numeros = self._identidades_para_consulta([identidade])
+        carregamentos = self._repository.list_by_item_identidades(
+            chaves_nfe=chaves,
+            numeros_nf=numeros,
+        )
         por_chave, por_nf = _montar_indice_conflitos(carregamentos)
         chave_normalizada = normalize_chave_nfe(chave_nfe)
         nf_normalizada = normalize_nf_number(nf)

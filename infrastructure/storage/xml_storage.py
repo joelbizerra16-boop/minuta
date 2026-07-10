@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from infrastructure.models.nota_fiscal import ItemNotaFiscalORM, NotaFiscalORM
@@ -23,6 +23,31 @@ class SqlXmlRecordRepository:
             rows = uow.session.scalars(stmt).all()
             return [orm_to_record(row, list(row.itens)) for row in rows]
 
+    def list_records_by_identities(self, identities: set[str] | list[str]) -> list[dict[str, Any]]:
+        """Carrega apenas NFs cujas identidades (chave 44 ou numero) estao no conjunto."""
+        normalized = {str(value).strip() for value in identities if str(value or "").strip()}
+        if not normalized:
+            return []
+
+        chaves = {value for value in normalized if len(value) == 44}
+        numeros = {value for value in normalized if value not in chaves}
+        conditions = []
+        if chaves:
+            conditions.append(NotaFiscalORM.chave_nfe.in_(sorted(chaves)))
+        if numeros:
+            conditions.append(NotaFiscalORM.numero_nf.in_(sorted(numeros)))
+        if not conditions:
+            return []
+
+        with UnitOfWork() as uow:
+            rows = uow.session.scalars(
+                select(NotaFiscalORM)
+                .options(selectinload(NotaFiscalORM.itens))
+                .where(or_(*conditions))
+                .order_by(NotaFiscalORM.numero_nf, NotaFiscalORM.id)
+            ).all()
+            return [orm_to_record(row, list(row.itens)) for row in rows]
+
     def replace_all_records(self, records: list[dict[str, Any]]) -> None:
         with UnitOfWork() as uow:
             existing_items = uow.session.scalars(select(ItemNotaFiscalORM)).all()
@@ -33,6 +58,7 @@ class SqlXmlRecordRepository:
                 uow.session.delete(row)
             uow.session.flush()
             self._insert_records(uow.session, records)
+        self._invalidate_signatures()
 
     def upsert_records(self, records: list[dict[str, Any]]) -> None:
         if not records:
@@ -61,6 +87,13 @@ class SqlXmlRecordRepository:
                     row.itens.clear()
                     SqlXmlRecordRepository._append_items_for_new_row(row, record)
             session.flush()
+        self._invalidate_signatures()
+
+    @staticmethod
+    def _invalidate_signatures() -> None:
+        from core.runtime_data_coherence import invalidate_data_signature_cache
+
+        invalidate_data_signature_cache()
 
     @staticmethod
     def _append_items_for_new_row(row: NotaFiscalORM, record: dict[str, Any]) -> None:

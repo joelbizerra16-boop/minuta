@@ -47,7 +47,9 @@ class SqlConfiguracaoRepository(ConfiguracaoRepository):
                 row.descricao = configuracao.descricao
                 row.atualizado_por_usuario_id = configuracao.atualizado_por_usuario_id
             uow.session.flush()
-            return self._to_record(row)
+            record = self._to_record(row)
+        self._invalidate_signatures()
+        return record
 
     def delete(self, chave: str) -> bool:
         with self._uow() as uow:
@@ -57,7 +59,14 @@ class SqlConfiguracaoRepository(ConfiguracaoRepository):
                 return False
             uow.session.delete(row)
             uow.session.flush()
-            return True
+        self._invalidate_signatures()
+        return True
+
+    @staticmethod
+    def _invalidate_signatures() -> None:
+        from core.runtime_data_coherence import invalidate_data_signature_cache
+
+        invalidate_data_signature_cache()
 
     def _uow(self) -> UnitOfWork:
         return UnitOfWork(self._session)

@@ -47,6 +47,7 @@ from core.runtime_data_coherence import (
     get_operational_data_signature,
     get_reference_data_signature,
     get_separacao_storage_status_from_db,
+    invalidate_data_signature_cache,
 )
 from core.startup_environment import run_startup_environment_checks
 from core.startup_retention import run_startup_retention_once
@@ -2364,13 +2365,39 @@ def parse_xml_upload_batch(
     return list(batch_lookup.values()), summary, issues
 
 
+def _load_operational_xml_records_for_identities(
+    identities: set[str],
+) -> tuple[list[dict[str, object]], str]:
+    """Leitura operacional para deduplicacao — somente identidades do lote."""
+    try:
+        records = SqlXmlRecordRepository().list_records_by_identities(identities)
+        return [serialize_xml_record(item) for item in records], ""
+    except Exception as exc:
+        return [], f"Os XMLs salvos no sistema nao puderam ser lidos ({exc}). Envie novos arquivos para atualizar a base."
+
+
+def _load_operational_xml_records_from_repository() -> tuple[list[dict[str, object]], str]:
+    """Leitura operacional completa — uso legado/diagnostico; preferir por identidades."""
+    try:
+        records = SqlXmlRecordRepository().list_all_records()
+        return [serialize_xml_record(item) for item in records], ""
+    except Exception as exc:
+        return [], f"Os XMLs salvos no sistema nao puderam ser lidos ({exc}). Envie novos arquivos para atualizar a base."
+
+
 def persist_xml_records(
     parsed_records: list[dict[str, object]],
     parse_summary: dict[str, int],
     parse_issues: list[str],
 ) -> tuple[dict[str, int], list[str]]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    existing_records, load_error = carregar_xmls_processados_json(str(XMLS_PROCESSADOS_JSON_PATH))
+    lote_identities = {
+        identity
+        for serialized in parsed_records
+        for identity in [get_xml_identity(serialized)]
+        if identity
+    }
+    existing_records, load_error = _load_operational_xml_records_for_identities(lote_identities)
     issues = list(parse_issues)
     summary = {
         "total_arquivos": int(parse_summary.get("total_arquivos", 0)),
@@ -4074,6 +4101,7 @@ def invalidate_runtime_data() -> None:
 
 def mark_persistence_layer_stale(*, reference: bool = False, operational: bool = False) -> None:
     """Invalida caches de leitura apos escrita confirmada no PostgreSQL."""
+    invalidate_data_signature_cache()
     if reference:
         st.session_state["runtime_data_signature"] = None
         carregar_xmls_processados_records.clear()
@@ -7842,8 +7870,6 @@ def main() -> None:
         run_startup_environment_checks()
     with measure("startup.configure_storage"):
         configure_application_storage()
-    with measure("startup.retencao_automatica"):
-        run_startup_retention_once()
     initialize_login_state()
     initialize_navigation_state()
 
@@ -7858,6 +7884,10 @@ def main() -> None:
         with measure("ui.render_login"):
             render_login_screen()
         return
+
+    # Retencao automatica apos login — nao bloqueia TTI da tela de autenticacao.
+    with measure("startup.retencao_automatica"):
+        run_startup_retention_once()
 
     maybe_prompt_capacidade_critica()
     maybe_prompt_gestao_dados()

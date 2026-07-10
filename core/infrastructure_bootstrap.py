@@ -38,6 +38,9 @@ def reset_infrastructure_bootstrap_state() -> None:
     reset_app_bootstrap_state()
     reset_environment_diagnostics_cache()
     startup_environment.reset_startup_environment_cache()
+    from core.runtime_data_coherence import invalidate_data_signature_cache
+
+    invalidate_data_signature_cache()
     reset_database_state()
     reset_schema_bootstrap_state()
     auth_bootstrap.reset_auth_bootstrap_state()

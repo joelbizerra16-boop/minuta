@@ -104,6 +104,30 @@ class AnaliseOperacionalService:
             self._carregamentos_cache = self._repository.list_all()
         return self._carregamentos_cache
 
+    def _extrair_identidades_consulta(self, processed_df: pd.DataFrame) -> tuple[set[str], set[str]]:
+        chaves: set[str] = set()
+        numeros: set[str] = set()
+        if processed_df.empty:
+            return chaves, numeros
+        for _, row in processed_df.iterrows():
+            chave = normalize_chave_nfe(row.get("ChaveNFe", ""))
+            nf_raw = str(row.get("NF", "") or "").strip()
+            nf_norm = normalize_nf_number(nf_raw)
+            if chave:
+                chaves.add(chave)
+            if nf_norm:
+                numeros.add(nf_norm)
+            if nf_raw:
+                numeros.add(nf_raw)
+        return chaves, numeros
+
+    def _carregar_por_identidades_lote(self, processed_df: pd.DataFrame) -> list[Carregamento]:
+        chaves, numeros = self._extrair_identidades_consulta(processed_df)
+        return self._repository.list_by_item_identidades(chaves_nfe=chaves, numeros_nf=numeros)
+
+    def _obter_indice_para_lote(self, processed_df: pd.DataFrame) -> IndiceHistoricoCarregamento:
+        return IndiceHistoricoCarregamento(self._carregar_por_identidades_lote(processed_df))
+
     def _obter_indice(self) -> IndiceHistoricoCarregamento:
         if self._indice_cache is None:
             self._indice_cache = IndiceHistoricoCarregamento(self._obter_carregamentos())
@@ -117,7 +141,7 @@ class AnaliseOperacionalService:
                 mensagens=["Nenhum dado processado para analise operacional."],
             )
 
-        indice = self._obter_indice()
+        indice = self._obter_indice_para_lote(processed_df)
         nfs_lote = self._extrair_nfs_unicas(processed_df)
         diagnostico = DiagnosticoCarregamento(cenario=CenarioOperacional.NOVO, nfs=nfs_lote)
         diagnostico.nfs_total = len(nfs_lote)
@@ -232,7 +256,7 @@ class AnaliseOperacionalService:
         if not nfs_lote:
             return AuditoriaNfLote(data_consulta=self._formatar_data_hora_consulta(datetime.now()))
 
-        carregamentos = self._obter_carregamentos()
+        carregamentos = self._carregar_por_identidades_lote(processed_df)
         nf_para_carregamentos, carregamento_map, rota_por_nf = self._mapear_nf_carregamentos(
             carregamentos,
             {item.token for item in nfs_lote},
@@ -504,7 +528,7 @@ class AnaliseOperacionalService:
         return processed_df[mask].copy()
 
     def _extrair_nfs_unicas(self, processed_df: pd.DataFrame) -> list[NfLoteResumo]:
-        indice = self._obter_indice()
+        indice = self._obter_indice_para_lote(processed_df)
         agrupado: dict[str, NfLoteResumo] = {}
         for _, row in processed_df.iterrows():
             chave = normalize_chave_nfe(row.get("ChaveNFe", ""))

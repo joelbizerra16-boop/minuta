@@ -435,7 +435,7 @@ class FechamentoCarregamentoService:
                 )
             )
 
-        self._invalidate_analise_cache()
+        # Reimpressao nao altera itens/historico de NF — cache de analise permanece valido.
         return FechamentoResult(status="reimpressao", carregamento=atualizado, impressao_info=info)
 
     def _persistir_novo_carregamento(

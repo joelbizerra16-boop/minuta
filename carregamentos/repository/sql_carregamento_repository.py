@@ -5,7 +5,7 @@ from pathlib import Path
 
 import re
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from carregamentos.models.carregamento import Carregamento, CarregamentoFiltro, CarregamentoItem
@@ -34,6 +34,38 @@ class SqlCarregamentoRepository(CarregamentoRepository):
     def list_all(self) -> list[Carregamento]:
         with self._uow() as uow:
             rows = uow.session.scalars(self._base_stmt()).all()
+            usuarios = self._preload_usuarios(uow.session, rows)
+            return [self._to_domain(uow.session, row, usuarios) for row in rows]
+
+    def list_by_item_identidades(
+        self,
+        *,
+        chaves_nfe: set[str] | None = None,
+        numeros_nf: set[str] | None = None,
+    ) -> list[Carregamento]:
+        """Carrega apenas carregamentos que possuem itens com as chaves/NFs informadas."""
+        chaves = {str(value).strip() for value in (chaves_nfe or set()) if str(value or "").strip()}
+        numeros = {str(value).strip() for value in (numeros_nf or set()) if str(value or "").strip()}
+        if not chaves and not numeros:
+            return []
+
+        conditions = []
+        if chaves:
+            conditions.append(ItemCarregamentoORM.chave_nfe.in_(sorted(chaves)))
+        if numeros:
+            conditions.append(ItemCarregamentoORM.numero_nf.in_(sorted(numeros)))
+
+        with self._uow() as uow:
+            carregamento_ids = list(
+                uow.session.scalars(
+                    select(ItemCarregamentoORM.carregamento_id).where(or_(*conditions)).distinct()
+                ).all()
+            )
+            if not carregamento_ids:
+                return []
+            rows = uow.session.scalars(
+                self._base_stmt().where(CarregamentoORM.id.in_(carregamento_ids))
+            ).all()
             usuarios = self._preload_usuarios(uow.session, rows)
             return [self._to_domain(uow.session, row, usuarios) for row in rows]
 
@@ -134,6 +166,16 @@ class SqlCarregamentoRepository(CarregamentoRepository):
         """Upsert idempotente pela UNIQUE (carregamento_id, numero_nf, codigo_produto, sequencia)."""
         carregamento_id = int(row.id)
         desired_keys: set[tuple[str, str | None, int]] = set()
+        existing_by_key = {
+            self._item_business_key(
+                numero_nf=str(existing.numero_nf),
+                codigo_produto=existing.codigo_produto,
+                sequencia=int(existing.sequencia),
+            ): existing
+            for existing in session.scalars(
+                select(ItemCarregamentoORM).where(ItemCarregamentoORM.carregamento_id == carregamento_id)
+            ).all()
+        }
 
         for index, item in enumerate(itens, start=1):
             key = self._item_business_key(
@@ -142,19 +184,13 @@ class SqlCarregamentoRepository(CarregamentoRepository):
                 sequencia=index,
             )
             desired_keys.add(key)
-            existing = session.scalars(
-                select(ItemCarregamentoORM).where(
-                    ItemCarregamentoORM.carregamento_id == carregamento_id,
-                    ItemCarregamentoORM.numero_nf == item.nf,
-                    ItemCarregamentoORM.codigo_produto == item.cprod,
-                    ItemCarregamentoORM.sequencia == index,
-                )
-            ).first()
+            existing = existing_by_key.get(key)
             if existing is not None:
                 self._apply_item_fields(existing, item, index)
                 continue
             item_row = item_domain_to_orm(item, carregamento_id, index)
             session.add(item_row)
+            existing_by_key[key] = item_row
 
         for item_row in list(row.itens):
             key = self._item_business_key(

@@ -11,6 +11,31 @@ class CarregamentoRepository(ABC):
     def list_all(self) -> list[Carregamento]:
         raise NotImplementedError
 
+    def list_by_item_identidades(
+        self,
+        *,
+        chaves_nfe: set[str] | None = None,
+        numeros_nf: set[str] | None = None,
+    ) -> list[Carregamento]:
+        """Default: filtra list_all em memoria (implementacoes SQL devem sobrescrever)."""
+        chaves = {str(value).strip() for value in (chaves_nfe or set()) if str(value or "").strip()}
+        numeros = {str(value).strip() for value in (numeros_nf or set()) if str(value or "").strip()}
+        if not chaves and not numeros:
+            return []
+        from carregamentos.models.carregamento import normalize_chave_nfe, normalize_nf_number
+
+        resultados: list[Carregamento] = []
+        for carregamento in self.list_all():
+            for item in carregamento.itens:
+                item_chave = normalize_chave_nfe(item.chave_nfe)
+                item_nf = normalize_nf_number(item.nf)
+                if (item_chave and item_chave in chaves) or (item_nf and item_nf in numeros) or (
+                    str(item.nf or "").strip() in numeros
+                ):
+                    resultados.append(carregamento)
+                    break
+        return resultados
+
     @abstractmethod
     def get_by_id(self, carregamento_id: int) -> Carregamento | None:
         raise NotImplementedError
