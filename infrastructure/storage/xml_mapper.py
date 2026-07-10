@@ -51,6 +51,21 @@ def _resolve_chave_nfe(record: dict[str, Any]) -> str:
     return digest[:44]
 
 
+def get_xml_storage_identity(record: dict[str, Any]) -> str:
+    """Identidade canonica para deduplicacao alinhada ao valor persistido em nota_fiscal.chave_nfe."""
+    raw_chave = str(record.get("ChaveNFe", "") or "").strip()
+    if raw_chave:
+        digits = re.sub(r"\D", "", raw_chave)
+        if len(digits) == 44:
+            return digits
+        if len(raw_chave) == 44:
+            return raw_chave
+    resolved = _resolve_chave_nfe(record)
+    if resolved:
+        return resolved
+    return str(record.get("NF", "") or record.get("nf_normalizada", "") or "").strip()
+
+
 def record_to_orm(record: dict[str, Any], row: NotaFiscalORM | None = None) -> NotaFiscalORM:
     target = row or NotaFiscalORM()
     target.chave_nfe = _resolve_chave_nfe(record)
@@ -88,7 +103,7 @@ def orm_to_record(row: NotaFiscalORM, itens: list[ItemNotaFiscalORM]) -> dict[st
     return {
         "NF": row.numero_nf,
         "nf_normalizada": row.numero_nf,
-        "ChaveNFe": row.chave_nfe if re.fullmatch(r"\d{44}", row.chave_nfe or "") else "",
+        "ChaveNFe": row.chave_nfe or "",
         "Data": data_label,
         "DataReferencia": data_ref,
         "DataReferenciaISO": data_ref,

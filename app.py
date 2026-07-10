@@ -1809,10 +1809,9 @@ def serialize_xml_record(xml_data: dict[str, object]) -> dict[str, object]:
 
 
 def get_xml_identity(xml_data: dict[str, object]) -> str:
-    chave = normalize_chave_nfe(xml_data.get("ChaveNFe", ""))
-    if chave:
-        return chave
-    return normalize_nf(xml_data.get("NF", "") or xml_data.get("nf_normalizada", ""))
+    from infrastructure.storage.xml_mapper import get_xml_storage_identity
+
+    return get_xml_storage_identity(xml_data)
 
 
 def get_xml_reference_datetime(record: dict[str, object]) -> datetime | None:
