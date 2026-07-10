@@ -9,7 +9,7 @@ from core.environment_diagnostics import (
     log_environment_diagnostics,
     run_environment_diagnostics,
 )
-from core.env_loader import load_project_dotenv
+from core.env_loader import hydrate_runtime_secrets, load_project_dotenv
 from core.settings import reset_settings_cache
 
 _LOGGER = logging.getLogger("minuta.startup.environment")
@@ -22,6 +22,7 @@ def bootstrap_environment_from_dotenv() -> None:
     global _DOTENV_BOOTSTRAPPED
     if _DOTENV_BOOTSTRAPPED:
         return
+    hydrate_runtime_secrets()
     result = load_project_dotenv()
     reset_settings_cache()
     _DOTENV_BOOTSTRAPPED = True

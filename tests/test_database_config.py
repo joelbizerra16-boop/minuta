@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -15,6 +16,7 @@ from core.database_config import (
     resolve_database_url,
     resolve_runtime_environment,
 )
+from core.env_loader import hydrate_runtime_secrets, reset_streamlit_secret_state
 from core.settings import get_settings, reset_settings_cache
 
 
@@ -96,9 +98,67 @@ def test_get_settings_production_mode_requires_database_url() -> None:
         os.environ["MINUTA_ENV"] = "production"
         settings_module._DOTENV_LOADED = False
         settings_module._DOTENV_RESULT = None
-        with patch("core.env_loader.resolve_dotenv_path", return_value=missing):
-            reset_settings_cache()
-            with pytest.raises(ProductionDatabaseConfigurationError):
-                get_settings()
+        with patch("core.env_loader.hydrate_runtime_secrets", return_value=False):
+            with patch("core.env_loader.resolve_dotenv_path", return_value=missing):
+                reset_settings_cache()
+                with pytest.raises(ProductionDatabaseConfigurationError):
+                    get_settings()
         os.environ.pop("MINUTA_ENV", None)
+    reset_settings_cache()
+
+
+def test_hydrate_streamlit_secrets_promotes_database_url() -> None:
+    import core.settings as settings_module
+
+    reset_settings_cache()
+    reset_streamlit_secret_state()
+    postgres_url = "postgresql+psycopg2://user:pass@neon.example/neondb?sslmode=require"
+    for key in list(os.environ.keys()):
+        if key.startswith("MINUTA_"):
+            os.environ.pop(key, None)
+
+    fake_secrets = MagicMock()
+    fake_secrets.to_dict.return_value = {"MINUTA_DATABASE_URL": postgres_url}
+
+    settings_module._DOTENV_LOADED = False
+    settings_module._DOTENV_RESULT = None
+    mock_streamlit = MagicMock()
+    mock_streamlit.secrets = fake_secrets
+    with patch.dict(sys.modules, {"streamlit": mock_streamlit}):
+        with patch("core.database_config.Path.cwd", return_value=Path("/mount/src/minuta")):
+            with patch("core.env_loader.resolve_dotenv_path", return_value=Path("/mount/src/minuta/missing.env")):
+                reset_settings_cache()
+                settings = get_settings()
+
+    assert settings.runtime_environment == RuntimeEnvironment.PRODUCTION
+    assert settings.database_url == postgres_url
+    assert settings.database_url_source == DatabaseUrlSource.STREAMLIT_SECRETS
+    reset_settings_cache()
+
+
+def test_hydrate_streamlit_nested_secret_promotes_database_url() -> None:
+    import core.settings as settings_module
+
+    reset_settings_cache()
+    reset_streamlit_secret_state()
+    postgres_url = "postgresql+psycopg2://user:pass@neon.example/neondb?sslmode=require"
+    for key in list(os.environ.keys()):
+        if key.startswith("MINUTA_"):
+            os.environ.pop(key, None)
+
+    fake_secrets = MagicMock()
+    fake_secrets.to_dict.return_value = {"minuta": {"database_url": postgres_url}}
+
+    settings_module._DOTENV_LOADED = False
+    settings_module._DOTENV_RESULT = None
+    mock_streamlit = MagicMock()
+    mock_streamlit.secrets = fake_secrets
+    with patch.dict(sys.modules, {"streamlit": mock_streamlit}):
+        with patch("core.database_config.Path.cwd", return_value=Path("/mount/src/minuta")):
+            with patch("core.env_loader.resolve_dotenv_path", return_value=Path("/mount/src/minuta/missing.env")):
+                reset_settings_cache()
+                settings = get_settings()
+
+    assert settings.database_url == postgres_url
+    assert settings.database_url_source == DatabaseUrlSource.STREAMLIT_SECRETS
     reset_settings_cache()

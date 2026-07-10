@@ -29,6 +29,7 @@ class RuntimeEnvironment(str, Enum):
 
 class DatabaseUrlSource(str, Enum):
     ENVIRONMENT = "environment"
+    STREAMLIT_SECRETS = "streamlit_secrets"
     DOTENV = "dotenv"
     SQLITE_DEFAULT = "sqlite_default"
 
@@ -45,7 +46,10 @@ class DatabaseUrlResolution:
 
 
 def reset_database_config_state() -> None:
+    from core.env_loader import reset_streamlit_secret_state
+
     _ENV_SNAPSHOT_BEFORE_DOTENV.clear()
+    reset_streamlit_secret_state()
 
 
 def snapshot_environment_before_dotenv() -> None:
@@ -90,7 +94,11 @@ def resolve_database_url(
 ) -> DatabaseUrlResolution:
     configured = str(minuta_database_url or "").strip()
     if configured:
-        if _database_url_from_snapshot():
+        from core.env_loader import streamlit_promoted_env_keys
+
+        if "MINUTA_DATABASE_URL" in streamlit_promoted_env_keys():
+            source = DatabaseUrlSource.STREAMLIT_SECRETS
+        elif _database_url_from_snapshot():
             source = DatabaseUrlSource.ENVIRONMENT
         elif dotenv_loaded:
             source = DatabaseUrlSource.DOTENV

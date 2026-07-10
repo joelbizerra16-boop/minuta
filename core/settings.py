@@ -17,7 +17,13 @@ from core.database_config import (
     resolve_runtime_environment,
     snapshot_environment_before_dotenv,
 )
-from core.env_loader import DotenvLoadResult, load_project_dotenv, resolve_dotenv_path
+from core.env_loader import (
+    DotenvLoadResult,
+    hydrate_runtime_secrets,
+    load_project_dotenv,
+    lookup_runtime_secret,
+    resolve_dotenv_path,
+)
 from infrastructure.persistence.sql_compat import normalize_dialect
 
 _DOTENV_LOADED = False
@@ -44,9 +50,10 @@ def _default_sqlite_source_url() -> str | None:
 
 
 def ensure_dotenv_loaded() -> DotenvLoadResult:
-    """Carrega .env uma vez por processo antes de ler variaveis."""
+    """Carrega secrets do runtime e .env uma vez por processo antes de ler variaveis."""
     global _DOTENV_LOADED, _DOTENV_RESULT
     if not _DOTENV_LOADED:
+        hydrate_runtime_secrets()
         snapshot_environment_before_dotenv()
         _DOTENV_RESULT = load_project_dotenv()
         _DOTENV_LOADED = True
@@ -54,9 +61,11 @@ def ensure_dotenv_loaded() -> DotenvLoadResult:
 
 
 def get_env(name: str, default: str | None = None) -> str | None:
-    """Leitura centralizada de variaveis de ambiente (apos .env)."""
+    """Leitura centralizada de variaveis de ambiente (secrets, .env e sistema)."""
     ensure_dotenv_loaded()
     value = os.getenv(name)
+    if value is None:
+        value = lookup_runtime_secret(name)
     if value is None:
         return default
     stripped = str(value).strip()

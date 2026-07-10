@@ -24,11 +24,13 @@ def _reset_dotenv_state() -> None:
     import core.settings as settings_module
     import core.startup_environment as startup_module
     from core.database_config import reset_database_config_state
+    from core.env_loader import reset_streamlit_secret_state
 
     settings_module._DOTENV_LOADED = False
     settings_module._DOTENV_RESULT = None
     startup_module._DOTENV_BOOTSTRAPPED = False
     reset_database_config_state()
+    reset_streamlit_secret_state()
     env_loader_module  # keep reference
     reset_settings_cache()
 
