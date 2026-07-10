@@ -162,3 +162,61 @@ def test_hydrate_streamlit_nested_secret_promotes_database_url() -> None:
     assert settings.database_url == postgres_url
     assert settings.database_url_source == DatabaseUrlSource.STREAMLIT_SECRETS
     reset_settings_cache()
+
+
+def test_hydrate_streamlit_connections_neon_url() -> None:
+    import core.settings as settings_module
+
+    reset_settings_cache()
+    reset_streamlit_secret_state()
+    postgres_url = "postgresql+psycopg2://user:pass@neon.example/neondb?sslmode=require"
+    for key in list(os.environ.keys()):
+        if key.startswith("MINUTA_"):
+            os.environ.pop(key, None)
+
+    fake_secrets = MagicMock()
+    fake_secrets.to_dict.return_value = {
+        "connections": {"neon": {"url": postgres_url}},
+    }
+
+    settings_module._DOTENV_LOADED = False
+    settings_module._DOTENV_RESULT = None
+    mock_streamlit = MagicMock()
+    mock_streamlit.secrets = fake_secrets
+    with patch.dict(sys.modules, {"streamlit": mock_streamlit}):
+        with patch("core.database_config.Path.cwd", return_value=Path("/mount/src/minuta")):
+            with patch("core.env_loader.resolve_dotenv_path", return_value=Path("/mount/src/minuta/missing.env")):
+                reset_settings_cache()
+                settings = get_settings()
+
+    assert settings.runtime_environment == RuntimeEnvironment.PRODUCTION
+    assert settings.database_url == postgres_url
+    assert settings.database_url_source == DatabaseUrlSource.STREAMLIT_SECRETS
+    reset_settings_cache()
+
+
+def test_production_wrong_secret_key_still_raises() -> None:
+    import core.settings as settings_module
+
+    reset_settings_cache()
+    reset_streamlit_secret_state()
+    for key in list(os.environ.keys()):
+        if key.startswith("MINUTA_"):
+            os.environ.pop(key, None)
+
+    fake_secrets = MagicMock()
+    fake_secrets.to_dict.return_value = {
+        "DATABASE_URL": "postgresql+psycopg2://user:pass@neon.example/neondb?sslmode=require",
+    }
+
+    settings_module._DOTENV_LOADED = False
+    settings_module._DOTENV_RESULT = None
+    mock_streamlit = MagicMock()
+    mock_streamlit.secrets = fake_secrets
+    with patch.dict(sys.modules, {"streamlit": mock_streamlit}):
+        with patch("core.database_config.Path.cwd", return_value=Path("/mount/src/minuta")):
+            with patch("core.env_loader.resolve_dotenv_path", return_value=Path("/mount/src/minuta/missing.env")):
+                reset_settings_cache()
+                with pytest.raises(ProductionDatabaseConfigurationError):
+                    get_settings()
+    reset_settings_cache()
