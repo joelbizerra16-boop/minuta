@@ -32,13 +32,13 @@ def reset_infrastructure_bootstrap_state() -> None:
     from carregamentos import bootstrap as carregamentos_bootstrap
     from core import startup_environment
     from core.environment_diagnostics import reset_environment_diagnostics_cache
-    from infrastructure import database as database_module
+    from infrastructure.database import reset_database_state
     from infrastructure.schema import reset_schema_bootstrap_state
 
     reset_app_bootstrap_state()
     reset_environment_diagnostics_cache()
     startup_environment.reset_startup_environment_cache()
-    database_module.reset_database_state()
+    reset_database_state()
     reset_schema_bootstrap_state()
     auth_bootstrap.reset_auth_bootstrap_state()
     carregamentos_bootstrap.reset_carregamentos_bootstrap_state()

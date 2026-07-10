@@ -121,3 +121,22 @@ def test_services_not_recreated_on_rerun() -> None:
         assert get_carregamento_repository() is repo_first
         assert get_analise_operacional_service() is analise_first
         _dispose_before_tempdir_cleanup()
+
+
+def test_orm_model_reload_does_not_raise_invalid_request_error() -> None:
+    """Regressao: reimportar modulos ORM nao deve falhar com tabela duplicada no MetaData."""
+    import importlib
+    import sys
+
+    from infrastructure.models.base import Base
+    from infrastructure.models import PerfilORM
+
+    assert "perfil" in Base.metadata.tables
+
+    del sys.modules["infrastructure.models.perfil"]
+    importlib.reload(sys.modules["infrastructure.models"])
+
+    from infrastructure.models.perfil import PerfilORM as ReloadedPerfilORM
+
+    assert "perfil" in Base.metadata.tables
+    assert ReloadedPerfilORM.__tablename__ == PerfilORM.__tablename__
