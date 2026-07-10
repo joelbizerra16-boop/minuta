@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import re
@@ -7,7 +8,7 @@ import re
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from carregamentos.models.carregamento import Carregamento, CarregamentoFiltro
+from carregamentos.models.carregamento import Carregamento, CarregamentoFiltro, CarregamentoItem
 from carregamentos.repository.carregamento_mapper import (
     domain_to_orm,
     item_domain_to_orm,
@@ -83,22 +84,86 @@ class SqlCarregamentoRepository(CarregamentoRepository):
             domain_to_orm(carregamento, row, usuario_id=usuario_id)
 
         if carregamento.itens:
-            for item in list(row.itens):
-                session.delete(item)
-            session.flush()
-            for index, item in enumerate(carregamento.itens, start=1):
-                item_row = item_domain_to_orm(item, int(row.id), index)
-                session.add(item_row)
+            self._sync_itens_in_session(session, row, list(carregamento.itens))
 
         self._sync_document_paths(session, row, carregamento, usuario_id)
         session.flush()
-        reloaded = session.scalars(self._base_stmt().where(CarregamentoORM.id == row.id)).one()
+        # Evita colecao stale no identity map apos upsert (senão o caller regrava lista incompleta).
+        session.expire(row, ["itens", "documentos"])
+        reloaded = session.scalars(
+            self._base_stmt()
+            .where(CarregamentoORM.id == row.id)
+            .execution_options(populate_existing=True)
+        ).one()
         domain = self._to_domain(session, reloaded)
         if carregamento.itens and not domain.itens:
             from dataclasses import replace
 
             domain = replace(domain, itens=list(carregamento.itens))
         return domain
+
+    @staticmethod
+    def _item_business_key(
+        *,
+        numero_nf: str,
+        codigo_produto: str | None,
+        sequencia: int,
+    ) -> tuple[str, str | None, int]:
+        return (str(numero_nf), codigo_produto, int(sequencia))
+
+    @classmethod
+    def _apply_item_fields(cls, target: ItemCarregamentoORM, item: CarregamentoItem, sequencia: int) -> None:
+        target.numero_nf = item.nf
+        target.codigo_produto = item.cprod
+        target.descricao = item.descricao
+        target.quantidade = Decimal(str(item.quantidade))
+        target.unidade = item.unidade
+        target.peso = Decimal(str(item.peso))
+        target.destinatario = item.destinatario
+        target.rota = item.rota
+        target.chave_nfe = item.chave_nfe or None
+        target.status_nf = item.status_nf or None
+        target.sequencia = sequencia
+
+    def _sync_itens_in_session(
+        self,
+        session: Session,
+        row: CarregamentoORM,
+        itens: list[CarregamentoItem],
+    ) -> None:
+        """Upsert idempotente pela UNIQUE (carregamento_id, numero_nf, codigo_produto, sequencia)."""
+        carregamento_id = int(row.id)
+        desired_keys: set[tuple[str, str | None, int]] = set()
+
+        for index, item in enumerate(itens, start=1):
+            key = self._item_business_key(
+                numero_nf=item.nf,
+                codigo_produto=item.cprod,
+                sequencia=index,
+            )
+            desired_keys.add(key)
+            existing = session.scalars(
+                select(ItemCarregamentoORM).where(
+                    ItemCarregamentoORM.carregamento_id == carregamento_id,
+                    ItemCarregamentoORM.numero_nf == item.nf,
+                    ItemCarregamentoORM.codigo_produto == item.cprod,
+                    ItemCarregamentoORM.sequencia == index,
+                )
+            ).first()
+            if existing is not None:
+                self._apply_item_fields(existing, item, index)
+                continue
+            item_row = item_domain_to_orm(item, carregamento_id, index)
+            session.add(item_row)
+
+        for item_row in list(row.itens):
+            key = self._item_business_key(
+                numero_nf=str(item_row.numero_nf),
+                codigo_produto=item_row.codigo_produto,
+                sequencia=int(item_row.sequencia),
+            )
+            if key not in desired_keys:
+                session.delete(item_row)
 
     def registrar_impressao(self, session: Session, carregamento_id: int, usuario_id: int) -> Carregamento:
         row = session.get(CarregamentoORM, carregamento_id)
