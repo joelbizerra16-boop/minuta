@@ -33,6 +33,95 @@ class DecisaoOperacional(str, Enum):
     CANCELAR = "CANCELAR"
 
 
+class ClassificacaoOperacionalNf(str, Enum):
+    NOVA = "NOVA"
+    REENTREGA = "REENTREGA"
+    REIMPRESSAO = "REIMPRESSAO"
+    COMPLEMENTACAO = "COMPLEMENTACAO"
+    BALCAO = "BALCAO"
+    DUPLICIDADE = "DUPLICIDADE"
+    INVALIDA = "INVALIDA"
+
+
+class OperacaoProposta(str, Enum):
+    INSERT_ITENS = "INSERT_ITENS"
+    REUTILIZAR_REGISTROS = "REUTILIZAR_REGISTROS"
+    REIMPRESSAO_PDF = "REIMPRESSAO_PDF"
+    REGISTRAR_REENTREGA = "REGISTRAR_REENTREGA"
+    IGNORAR = "IGNORAR"
+    REGISTRAR_OCORRENCIA = "REGISTRAR_OCORRENCIA"
+
+
+class SeveridadeDiagnostico(str, Enum):
+    INFORMATIVO = "INFORMATIVO"
+    REQUER_CONFIRMACAO = "REQUER_CONFIRMACAO"
+    BLOQUEIO_ESTRUTURAL = "BLOQUEIO_ESTRUTURAL"
+
+
+@dataclass(frozen=True)
+class DiagnosticoNfOperacional:
+    token: str
+    nf: str
+    chave_nfe: str
+    classificacao: ClassificacaoOperacionalNf
+    impactos: tuple[str, ...] = ()
+    riscos: tuple[str, ...] = ()
+    recomendacao: str = ""
+    acao_proposta: OperacaoProposta = OperacaoProposta.IGNORAR
+    requer_confirmacao: bool = False
+    mensagens: tuple[str, ...] = ()
+    vinculo_carregamento_id: int | None = None
+    numero_carregamento: str = ""
+
+
+@dataclass
+class OcorrenciaProcessamentoNf:
+    token: str
+    nf: str
+    classificacao: ClassificacaoOperacionalNf
+    sucesso: bool
+    mensagem: str = ""
+
+
+@dataclass
+class ResultadoProcessamentoLote:
+    total_recebidas: int = 0
+    processadas: int = 0
+    reentregas: int = 0
+    reimpressoes: int = 0
+    duplicidades: int = 0
+    invalidas: int = 0
+    complementadas: int = 0
+    ocorrencias: list[OcorrenciaProcessamentoNf] = field(default_factory=list)
+
+    def resumo_texto(self) -> str:
+        partes = [f"{self.processadas} processada(s)"]
+        if self.reentregas:
+            partes.append(f"{self.reentregas} reentrega(s)")
+        if self.complementadas:
+            partes.append(f"{self.complementadas} complementada(s)")
+        if self.reimpressoes:
+            partes.append(f"{self.reimpressoes} reimpressao(oes)")
+        if self.duplicidades:
+            partes.append(f"{self.duplicidades} duplicidade(s) reutilizada(s)")
+        if self.invalidas:
+            partes.append(f"{self.invalidas} invalida(s)")
+        return " | ".join(partes)
+
+
+@dataclass
+class PlanoOperacionalLote:
+    decisao_lote: DecisaoOperacional
+    diagnostico_nf: list[DiagnosticoNfOperacional] = field(default_factory=list)
+    severidade: SeveridadeDiagnostico = SeveridadeDiagnostico.INFORMATIVO
+    bloqueio_estrutural: bool = False
+    mensagem_bloqueio: str = ""
+    carregamento_id: int | None = None
+    itens_para_inserir: int = 0
+    nfs_para_inserir: int = 0
+    nfs_para_reutilizar: int = 0
+
+
 @dataclass(frozen=True)
 class VinculoNfHistorico:
     carregamento_id: int

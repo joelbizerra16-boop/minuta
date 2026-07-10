@@ -144,10 +144,13 @@ def inferir_decisao_operacional(diagnostico: DiagnosticoCarregamento) -> Decisao
 
 
 def requer_confirmacao_explicita_historico(diagnostico: DiagnosticoCarregamento) -> bool:
+    if diagnostico.cenario == CenarioOperacional.NF_CANCELADA:
+        return False
+    if diagnostico.cenario == CenarioOperacional.CONFLITO_MULTIPLO:
+        return diagnostico.requer_decisao
     return (
         diagnostico.bloqueia_fechamento
         and diagnostico.opcoes_decisao == [DecisaoOperacional.CANCELAR]
-        and diagnostico.cenario != CenarioOperacional.NF_CANCELADA
     )
 
 
@@ -199,10 +202,14 @@ def get_diagnostico_efetivo_fechamento() -> DiagnosticoCarregamento | None:
         return diagnostico
     if not is_operacional_analise_confirmada():
         return diagnostico
-    if not diagnostico.bloqueia_fechamento:
+    if not diagnostico.bloqueia_fechamento and diagnostico.cenario != CenarioOperacional.CONFLITO_MULTIPLO:
         return diagnostico
     payload = diagnostico.to_dict()
     payload["bloqueia_fechamento"] = False
+    if diagnostico.cenario == CenarioOperacional.CONFLITO_MULTIPLO and decisao == DecisaoOperacional.NOVO:
+        payload["cenario"] = CenarioOperacional.NOVO.value
+        payload["opcoes_decisao"] = [DecisaoOperacional.NOVO.value]
+        payload["requer_decisao"] = False
     return DiagnosticoCarregamento.from_dict(payload)
 
 

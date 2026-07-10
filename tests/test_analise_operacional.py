@@ -141,19 +141,20 @@ def test_lote_parcialmente_repetido_complementacao() -> None:
             _teardown_sql_env()
 
 
-def test_nf_cancelada_bloqueia() -> None:
+def test_nf_cancelada_requer_decisao_operador() -> None:
     with tempfile.TemporaryDirectory() as tmp_dir:
         _setup_sql_env(Path(tmp_dir))
         try:
             df = _df(_row("3005", "35260600000000000000000000000000000000000035", "Cancelada"))
             diagnostico = get_analise_operacional_service().analisar_lote_processado(df)
             assert diagnostico.cenario == CenarioOperacional.NF_CANCELADA
-            assert diagnostico.bloqueia_fechamento is True
+            assert diagnostico.requer_decisao is True
+            assert diagnostico.bloqueia_fechamento is False
         finally:
             _teardown_sql_env()
 
 
-def test_conflito_multiplo_bloqueia() -> None:
+def test_conflito_multiplo_orienta_sem_bloqueio_automatico() -> None:
     with tempfile.TemporaryDirectory() as tmp_dir:
         _setup_sql_env(Path(tmp_dir))
         try:
@@ -165,7 +166,8 @@ def test_conflito_multiplo_bloqueia() -> None:
             )
             diagnostico = get_analise_operacional_service().analisar_lote_processado(misto)
             assert diagnostico.cenario == CenarioOperacional.CONFLITO_MULTIPLO
-            assert diagnostico.bloqueia_fechamento is True
+            assert diagnostico.bloqueia_fechamento is False
+            assert diagnostico.requer_decisao is True
         finally:
             _teardown_sql_env()
 

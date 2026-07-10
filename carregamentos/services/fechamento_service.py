@@ -21,11 +21,11 @@ from carregamentos.models.carregamento import (
 )
 from carregamentos.models.operacional import (
     CenarioOperacional,
-    ClassificacaoNfLote,
     DecisaoOperacional,
     DiagnosticoCarregamento,
 )
 from carregamentos.repository.sql_carregamento_repository import SqlCarregamentoRepository
+from carregamentos.services.lote_processamento_service import ErroEstruturalProcessamento, LoteProcessamentoService
 from carregamentos.services.nf_validation import NfHistoricoValidator, localizar_nf_no_lote
 from carregamentos.models.fechamento import FechamentoResult, ImpressaoInfo
 from infrastructure.models.constants import (
@@ -54,6 +54,7 @@ class FechamentoCarregamentoService:
         self._repository = repository
         self._data_dir = data_dir
         self._nf_validator = NfHistoricoValidator(repository)
+        self._lote_service = LoteProcessamentoService(repository)
 
     @staticmethod
     def _invalidate_analise_cache() -> None:
@@ -181,10 +182,18 @@ class FechamentoCarregamentoService:
             )
 
         if decisao == DecisaoOperacional.COMPLEMENTAR:
-            novos_df = self._filtrar_nfs_novas(processed_df, diagnostico)
+            plano = self._lote_service.montar_plano(
+                processed_df,
+                diagnostico,
+                DecisaoOperacional.COMPLEMENTAR,
+                existente,
+            )
+            if plano.bloqueio_estrutural:
+                return FechamentoResult(status="error", message=plano.mensagem_bloqueio)
             return self._complementar_carregamento(
                 existente,
-                novos_df=novos_df,
+                processed_df=processed_df,
+                plano=plano,
                 summary=summary,
                 current_user=current_user,
                 ip_origem=ip_origem,
@@ -194,133 +203,34 @@ class FechamentoCarregamentoService:
 
         return FechamentoResult(status="invalid", message="Decisao operacional invalida para fechamento.")
 
-    @staticmethod
-    def _filtrar_nfs_novas(processed_df: pd.DataFrame, diagnostico: DiagnosticoCarregamento) -> pd.DataFrame:
-        if processed_df.empty:
-            return processed_df.iloc[0:0]
-        tokens_novos = {
-            item.token
-            for item in diagnostico.nfs
-            if item.classificacao == ClassificacaoNfLote.NOVA
-        }
-        if not tokens_novos:
-            return processed_df.iloc[0:0]
-
-        def row_token(row: pd.Series) -> str:
-            chave = normalize_chave_nfe(row.get("ChaveNFe", ""))
-            if chave:
-                return chave
-            nf_norm = normalize_nf_number(row.get("NF", ""))
-            return f"nf:{nf_norm}" if nf_norm else ""
-
-        mask = processed_df.apply(row_token, axis=1).isin(tokens_novos)
-        return processed_df[mask].copy()
-
     def _complementar_carregamento(
         self,
         existente: Carregamento,
         *,
-        novos_df: pd.DataFrame,
+        processed_df: pd.DataFrame,
+        plano: object,
         summary: dict[str, Any],
         current_user: UsuarioPublico | None,
         ip_origem: str | None,
         gerar_minuta: bool,
         gerar_romaneio: bool,
     ) -> FechamentoResult:
-        novos_itens = self._build_itens_from_dataframe(novos_df)
-        if not novos_itens:
-            return FechamentoResult(status="invalid", message="Nenhuma NF nova para complementar o carregamento.")
-
-        chaves_existentes = {
-            (
-                normalize_nf_number(item.nf),
-                normalize_chave_nfe(item.chave_nfe),
-                str(item.cprod or "").strip(),
-            )
-            for item in existente.itens
-        }
-        itens_para_inserir: list[CarregamentoItem] = []
-        for item in novos_itens:
-            chave_item = (
-                normalize_nf_number(item.nf),
-                normalize_chave_nfe(item.chave_nfe),
-                str(item.cprod or "").strip(),
-            )
-            if chave_item in chaves_existentes:
-                continue
-            itens_para_inserir.append(item)
-
-        if not itens_para_inserir:
-            return FechamentoResult(
-                status="invalid",
-                message="Todas as NFs novas ja existem no carregamento. Nenhuma complementacao realizada.",
-            )
-
-        todos_itens = list(existente.itens) + itens_para_inserir
-        existente.itens = todos_itens
-        existente.quantidade_nf = len(
-            {
-                normalize_nf_number(item.nf) or normalize_chave_nfe(item.chave_nfe)
-                for item in todos_itens
-                if normalize_nf_number(item.nf) or normalize_chave_nfe(item.chave_nfe)
-            }
-        )
-        existente.quantidade_itens = len(todos_itens)
-        existente.peso_total = float(sum(float(item.peso or 0) for item in todos_itens))
-
-        usuario_id = self._resolve_usuario_id(current_user)
+        _ = summary
         try:
-            with UnitOfWork() as uow:
-                repo = SqlCarregamentoRepository(uow.session)
-                historico_repo = SqlHistoricoRepository(uow.session)
-                audit_repo = SqlEventoAuditoriaRepository(uow.session)
+            reloaded, relatorio = self._lote_service.executar_complementacao(
+                existente,
+                processed_df=processed_df,
+                plano=plano,  # type: ignore[arg-type]
+                current_user=current_user,
+                gerar_minuta=gerar_minuta,
+                gerar_romaneio=gerar_romaneio,
+                ip_origem=ip_origem,
+            )
+        except ErroEstruturalProcessamento as exc:
+            return FechamentoResult(status="error", message=str(exc))
 
-                saved = repo._save_in_session(uow.session, existente)
-                if gerar_minuta and not saved.minuta_pdf_path:
-                    saved.minuta_pdf_path = f"carregamentos/{saved.id}/minuta_carregamento.pdf"
-                if gerar_romaneio and not saved.romaneio_pdf_path:
-                    saved.romaneio_pdf_path = f"carregamentos/{saved.id}/romaneio_entrega.pdf"
-                if saved.minuta_pdf_path or saved.romaneio_pdf_path:
-                    saved = repo._save_in_session(uow.session, saved)
-
-                saved = repo.registrar_impressao(uow.session, saved.id, usuario_id)
-                historico_repo.append(
-                    HistoricoRecord(
-                        id=0,
-                        carregamento_id=saved.id,
-                        usuario_id=usuario_id,
-                        evento=HISTORICO_EVENTO_COMPLEMENTACAO,
-                        descricao=(
-                            f"Complementacao do carregamento {saved.numero_carregamento} "
-                            f"com {len(itens_para_inserir)} item(ns) novo(s)."
-                        ),
-                    )
-                )
-                audit_repo.append(
-                    EventoAuditoriaRecord(
-                        id=0,
-                        categoria=AUDIT_CATEGORIA_CARREGAMENTO,
-                        evento=AUDIT_EVENTO_COMPLEMENTACAO,
-                        usuario_id=usuario_id,
-                        entidade_tipo="carregamento",
-                        entidade_id=saved.id,
-                        descricao=f"Complementacao do carregamento {saved.numero_carregamento}",
-                        metadados_json=SqlEventoAuditoriaRepository.build_metadados(
-                            itens_adicionados=len(itens_para_inserir),
-                            gerar_minuta=gerar_minuta,
-                            gerar_romaneio=gerar_romaneio,
-                        ),
-                        ip_origem=ip_origem,
-                    )
-                )
-        except Exception as exc:
-            return FechamentoResult(status="error", message=f"Falha ao complementar carregamento: {exc}")
-
-        reloaded = self._repository.get_by_id(existente.id)
-        if reloaded is None:
-            return FechamentoResult(status="error", message="Carregamento nao encontrado apos complementacao.")
         self._invalidate_analise_cache()
-        return FechamentoResult(status="complementacao", carregamento=reloaded)
+        return LoteProcessamentoService.fechamento_com_relatorio("complementacao", reloaded, relatorio)
 
     def _registrar_reentrega_existente(
         self,
@@ -548,6 +458,11 @@ class FechamentoCarregamentoService:
     ) -> FechamentoResult:
         now = datetime.now()
         itens = self._build_itens_from_dataframe(processed_df)
+        try:
+            self._lote_service.validar_itens_novo_carregamento(itens)
+        except ErroEstruturalProcessamento as exc:
+            return FechamentoResult(status="error", message=str(exc))
+
         usuario_login = str(current_user.usuario if current_user else "sistema")
         usuario_id = self._resolve_usuario_id(current_user)
 
@@ -622,8 +537,10 @@ class FechamentoCarregamentoService:
                         ip_origem=ip_origem,
                     )
                 )
-        except Exception as exc:
-            return FechamentoResult(status="error", message=f"Falha ao salvar carregamento: {exc}")
+        except ErroEstruturalProcessamento as exc:
+            return FechamentoResult(status="error", message=str(exc))
+        except RuntimeError as exc:
+            return FechamentoResult(status="error", message=f"Falha estrutural ao salvar carregamento: {exc}")
 
         reloaded = self._repository.get_by_id(saved.id)
         if reloaded is None:

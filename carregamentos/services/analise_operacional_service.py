@@ -141,12 +141,12 @@ class AnaliseOperacionalService:
 
         if diagnostico.nfs_canceladas > 0:
             diagnostico.cenario = CenarioOperacional.NF_CANCELADA
-            diagnostico.bloqueia_fechamento = True
+            diagnostico.requer_decisao = True
             diagnostico.mensagens.append(
-                f"{diagnostico.nfs_canceladas} NF(s) cancelada(s) no lote. Corrija antes de continuar."
+                f"{diagnostico.nfs_canceladas} NF(s) cancelada(s) no lote. "
+                "Revise o lote e confirme a operacao desejada."
             )
             diagnostico.opcoes_decisao = [DecisaoOperacional.CANCELAR]
-            diagnostico.requer_decisao = True
             return diagnostico
 
         if diagnostico.nfs_novas == diagnostico.nfs_total:
@@ -156,11 +156,11 @@ class AnaliseOperacionalService:
 
         if diagnostico.carregamentos_distintos > 1:
             diagnostico.cenario = CenarioOperacional.CONFLITO_MULTIPLO
-            diagnostico.bloqueia_fechamento = True
             diagnostico.requer_decisao = True
             diagnostico.opcoes_decisao = [DecisaoOperacional.CANCELAR]
             diagnostico.mensagens.append(
-                "As NFs do lote pertencem a carregamentos diferentes. A operacao foi bloqueada."
+                "As NFs do lote pertencem a carregamentos diferentes. "
+                "Revise o historico e confirme a operacao desejada."
             )
             return diagnostico
 

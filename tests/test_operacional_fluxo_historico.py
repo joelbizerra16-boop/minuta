@@ -67,7 +67,7 @@ def _diagnostico_conflito() -> DiagnosticoCarregamento:
         nfs_existentes=18,
         carregamentos_distintos=2,
         requer_decisao=True,
-        bloqueia_fechamento=True,
+        bloqueia_fechamento=False,
         opcoes_decisao=[DecisaoOperacional.CANCELAR],
     )
 

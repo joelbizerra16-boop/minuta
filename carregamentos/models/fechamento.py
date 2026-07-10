@@ -32,3 +32,4 @@ class FechamentoResult:
     conflitos: tuple[NfHistoricoConflito, ...] = ()
     impressao_info: ImpressaoInfo | None = None
     message: str = ""
+    relatorio_lote: object | None = None
