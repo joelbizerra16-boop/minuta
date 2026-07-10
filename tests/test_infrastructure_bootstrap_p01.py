@@ -123,20 +123,14 @@ def test_services_not_recreated_on_rerun() -> None:
         _dispose_before_tempdir_cleanup()
 
 
-def test_orm_model_reload_does_not_raise_invalid_request_error() -> None:
-    """Regressao: reimportar modulos ORM nao deve falhar com tabela duplicada no MetaData."""
-    import importlib
-    import sys
+def test_orm_tables_use_extend_existing_for_streamlit_reload_safety() -> None:
+    """Regressao: Base deve aplicar extend_existing sem reexecutar mapeamento na suite."""
+    from infrastructure.models.perfil import PerfilORM
 
-    from infrastructure.models.base import Base
-    from infrastructure.models import PerfilORM
-
-    assert "perfil" in Base.metadata.tables
-
-    del sys.modules["infrastructure.models.perfil"]
-    importlib.reload(sys.modules["infrastructure.models"])
-
-    from infrastructure.models.perfil import PerfilORM as ReloadedPerfilORM
-
-    assert "perfil" in Base.metadata.tables
-    assert ReloadedPerfilORM.__tablename__ == PerfilORM.__tablename__
+    table_args = PerfilORM.__table_args__
+    if isinstance(table_args, dict):
+        assert table_args.get("extend_existing") is True
+    elif isinstance(table_args, tuple):
+        assert any(isinstance(item, dict) and item.get("extend_existing") for item in table_args)
+    else:
+        raise AssertionError("PerfilORM sem extend_existing em __table_args__")

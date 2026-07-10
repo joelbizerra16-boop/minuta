@@ -42,6 +42,12 @@ from utils.minuta_carregamento import (
     MinutaModuleConfig,
 )
 from core.bootstrap import configure_application_storage
+from core.runtime_data_coherence import (
+    get_classificacao_version_token,
+    get_operational_data_signature,
+    get_reference_data_signature,
+    get_separacao_storage_status_from_db,
+)
 from core.startup_environment import run_startup_environment_checks
 from core.startup_retention import run_startup_retention_once
 from core.performance import (
@@ -692,7 +698,10 @@ def build_default_product_classification_records() -> list[dict[str, str]]:
 
 
 @st.cache_data(show_spinner=False)
-def carregar_classificacao_produtos_records(json_path: str, version_token: int = 0) -> tuple[list[dict[str, str]], str]:
+def carregar_classificacao_produtos_records(
+    json_path: str,
+    version_token: tuple[int, str | None] | int = 0,
+) -> tuple[list[dict[str, str]], str]:
     _ = (json_path, version_token)
     default_records = build_default_product_classification_records()
     try:
@@ -718,7 +727,10 @@ def carregar_classificacao_produtos_records(json_path: str, version_token: int =
     return sorted(records.values(), key=lambda record: (-len(record["palavra_chave"]), record["palavra_chave"])), ""
 
 
-def carregar_classificacao_produtos_json(json_path: str, version_token: int = 0) -> tuple[list[dict[str, str]], str]:
+def carregar_classificacao_produtos_json(
+    json_path: str,
+    version_token: tuple[int, str | None] | int = 0,
+) -> tuple[list[dict[str, str]], str]:
     return carregar_classificacao_produtos_records(json_path, version_token)
 
 
@@ -2423,7 +2435,7 @@ def persist_xml_records(
 
     if delta_records:
         SqlXmlRecordRepository().upsert_records(delta_records)
-    carregar_xmls_processados_records.clear()
+    mark_persistence_layer_stale(reference=True)
 
     summary["processados"] = summary["novas"] + summary["atualizadas"]
     summary["ignorados"] = summary["ignoradas_separadas"]
@@ -2549,7 +2561,7 @@ def carregar_separacao_json(json_path: str) -> tuple[list[dict[str, object]], st
 def salvar_separacao_records(records: list[dict[str, object]]) -> None:
     serialized_records = [serialize_separacao_record(record) for record in records]
     _CONFIG_STORAGE.save_list(CONFIG_CHAVE_SEPARACAO, sort_separacao_records(serialized_records))
-    carregar_separacao_records.clear()
+    mark_persistence_layer_stale(operational=True)
     invalidate_latest_closed_lote_pdf_cache()
 
 
@@ -2775,7 +2787,7 @@ def salvar_lotes_records(records: list[dict[str, object]]) -> None:
         reverse=True,
     )
     _CONFIG_STORAGE.save_list(CONFIG_CHAVE_LOTES, normalized_records)
-    carregar_lotes_records.clear()
+    mark_persistence_layer_stale(operational=True)
 
 
 def salvar_lotes_json(records: list[dict[str, object]]) -> None:
@@ -3716,10 +3728,16 @@ def sincronizar_base_separacao(
 
 
 def get_separacao_storage_status() -> tuple[bool, str]:
-    records, _ = carregar_separacao_json("")
-    if not records:
+    has_records, revision = get_separacao_storage_status_from_db()
+    if not has_records:
         return False, ""
-    return True, format_datetime_display(datetime.now())
+    if revision:
+        try:
+            parsed = datetime.fromisoformat(str(revision).replace("Z", "+00:00"))
+            return True, format_datetime_display(parsed)
+        except ValueError:
+            return True, str(revision)
+    return True, ""
 
 
 @st.cache_data(show_spinner=False)
@@ -3738,7 +3756,7 @@ def salvar_separacao_excluidos_records(identities: set[str]) -> None:
         _CONFIG_STORAGE.save_list(CONFIG_CHAVE_SEPARACAO_EXCLUIDOS, [])
     else:
         _CONFIG_STORAGE.save_list(CONFIG_CHAVE_SEPARACAO_EXCLUIDOS, normalized_identities)
-    carregar_separacao_excluidos_records.clear()
+    mark_persistence_layer_stale(operational=True)
 
 
 def salvar_separacao_excluidos_json(identities: set[str]) -> None:
@@ -3880,7 +3898,7 @@ def executar_limpeza_dados_sistema(data_inicial: object, data_final: object, tip
         salvar_separacao_json([])
         salvar_lotes_json([])
         SqlXmlRecordRepository().replace_all_records([])
-        carregar_xmls_processados_records.clear()
+        mark_persistence_layer_stale(reference=True, operational=True)
         salvar_separacao_excluidos_json(set())
 
         return {
@@ -4023,7 +4041,7 @@ def executar_limpeza_dados_sistema(data_inicial: object, data_final: object, tip
         salvar_lotes_json(current_lotes_records)
     if xml_changed:
         SqlXmlRecordRepository().replace_all_records(current_xml_records)
-        carregar_xmls_processados_records.clear()
+        mark_persistence_layer_stale(reference=True)
     salvar_separacao_excluidos_json(updated_excluded_identities)
 
     return {
@@ -4048,13 +4066,26 @@ def format_file_size_mb(path: Path) -> str:
 
 
 def invalidate_runtime_data() -> None:
-    st.session_state["runtime_data_signature"] = None
-    st.session_state["runtime_operational_signature"] = None
+    mark_persistence_layer_stale(reference=True, operational=True)
     st.session_state["runtime_xml_records"] = []
     st.session_state["runtime_classificacao_records"] = []
-    st.session_state["runtime_refresh_required"] = True
     invalidate_balcao_lookup_cache()
     invalidate_latest_closed_lote_pdf_cache()
+
+
+def mark_persistence_layer_stale(*, reference: bool = False, operational: bool = False) -> None:
+    """Invalida caches de leitura apos escrita confirmada no PostgreSQL."""
+    if reference:
+        st.session_state["runtime_data_signature"] = None
+        carregar_xmls_processados_records.clear()
+        carregar_classificacao_produtos_records.clear()
+    if operational:
+        st.session_state["runtime_operational_signature"] = None
+        carregar_separacao_records.clear()
+        carregar_lotes_records.clear()
+        carregar_separacao_excluidos_records.clear()
+    if reference or operational:
+        st.session_state["runtime_refresh_required"] = True
 
 
 def get_path_cache_token(path: Path) -> int:
@@ -6069,7 +6100,8 @@ def render_separacao_screen(
     separacao_storage_error: str,
     import_summary: dict[str, int],
 ) -> None:
-    current_records = st.session_state.get("separacao_records", separacao_records)
+    st.session_state["separacao_records"] = separacao_records
+    current_records = separacao_records
     separacao_lookup = group_separacao_records_by_chave(current_records)
     lote_atual = ensure_lote_atual(current_records)
     sync_lotes_registry(current_records, lote_atual)
@@ -6333,11 +6365,11 @@ def render_separacao_screen(
 
         size_col_1, size_col_2, size_col_3 = st.columns(3, gap="medium")
         with size_col_1:
-            render_info_card("Base XMLs", format_file_size_mb(XMLS_PROCESSADOS_JSON_PATH), "xml", "Arquivo json de XMLs processados")
+            render_info_card("Base XMLs", f"{len(current_xml_records)} registro(s)", "xml", "PostgreSQL: nota_fiscal")
         with size_col_2:
-            render_info_card("Base Separação", format_file_size_mb(SEPARACAO_JSON_PATH), "separacao", "Arquivo json do mapa de separação")
+            render_info_card("Base Separação", f"{len(current_records)} registro(s)", "separacao", "PostgreSQL: configuracao")
         with size_col_3:
-            render_info_card("Base Lotes", format_file_size_mb(LOTES_JSON_PATH), "lotes", "Arquivo json dos lotes registrados")
+            render_info_card("Base Lotes", f"{len(current_lotes_registry)} registro(s)", "lotes", "PostgreSQL: configuracao")
 
         st.warning("Essa ação não pode ser desfeita.")
 
@@ -6398,7 +6430,7 @@ def render_separacao_screen(
 def render_lotes_management_screen(separacao_records: list[dict[str, object]]) -> None:
     classificacao_records, _ = carregar_classificacao_produtos_json(
         str(CLASSIFICACAO_PRODUTOS_JSON_PATH),
-        get_path_cache_token(CLASSIFICACAO_PRODUTOS_JSON_PATH),
+        get_classificacao_version_token(),
     )
     separacao_records = apply_current_sector_classification(separacao_records, classificacao_records)
     current_lote = st.session_state.get("lote_atual") if isinstance(st.session_state.get("lote_atual"), dict) else None
@@ -7501,15 +7533,11 @@ def render_global_app_styles() -> None:
 
 
 def load_runtime_reference_data(force_refresh: bool = False) -> tuple[list[dict[str, object]], list[dict[str, str]]]:
-    runtime_signature = (
-        get_path_cache_token(XMLS_PROCESSADOS_JSON_PATH),
-        get_path_cache_token(CLASSIFICACAO_PRODUTOS_JSON_PATH),
-    )
+    runtime_signature = get_reference_data_signature()
     should_refresh = (
         force_refresh
         or st.session_state.get("runtime_data_signature") != runtime_signature
         or not st.session_state.get("runtime_xml_records")
-        and XMLS_PROCESSADOS_JSON_PATH.is_file()
     )
 
     if should_refresh:
@@ -7519,7 +7547,7 @@ def load_runtime_reference_data(force_refresh: bool = False) -> tuple[list[dict[
             with measure("sql.carregar_classificacao"):
                 classificacao_records, _ = carregar_classificacao_produtos_json(
                     str(CLASSIFICACAO_PRODUTOS_JSON_PATH),
-                    get_path_cache_token(CLASSIFICACAO_PRODUTOS_JSON_PATH),
+                    get_classificacao_version_token(),
                 )
         st.session_state["runtime_xml_records"] = xml_records
         st.session_state["runtime_classificacao_records"] = classificacao_records
@@ -7537,7 +7565,7 @@ def load_runtime_operational_data(force_refresh: bool = False) -> tuple[list[dic
     xml_records, classificacao_records = load_runtime_reference_data(force_refresh=force_refresh)
     runtime_signature = (
         st.session_state.get("runtime_data_signature"),
-        get_path_cache_token(SEPARACAO_JSON_PATH),
+        get_operational_data_signature(),
     )
     should_refresh = (
         force_refresh

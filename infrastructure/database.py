@@ -164,6 +164,9 @@ def configure_database(
             cursor.close()
 
     log_engine_configured(_engine)
+    from infrastructure.persistence.sql_audit import register_sql_audit
+
+    register_sql_audit(_engine)
     _LOGGER.info(
         "database.configure engine_criado database_url=%s total_creates=%s pool_size=%s",
         normalized_url,
