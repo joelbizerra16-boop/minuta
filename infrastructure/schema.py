@@ -5,6 +5,7 @@ import logging
 from infrastructure.models.base import Base as ModelBase
 from infrastructure.persistence.bootstrap_log import log_schema_strategy
 from infrastructure.persistence.engine_info import get_engine_dialect
+from infrastructure.persistence.sqlite_schema_bootstrap import apply_sqlite_schema
 
 _LOGGER = logging.getLogger("minuta.persistence.schema")
 
@@ -18,7 +19,7 @@ def ensure_full_schema() -> None:
 
     if dialect == "sqlite":
         _LOGGER.info("persistence.schema_apply method=create_all dialect=sqlite")
-        ModelBase.metadata.create_all(engine, checkfirst=True)
+        apply_sqlite_schema(engine, ModelBase.metadata)
         return
 
     if dialect == "postgresql":
