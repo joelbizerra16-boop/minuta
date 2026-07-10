@@ -8,6 +8,15 @@ from pathlib import Path
 
 from sqlalchemy.engine import make_url
 
+from core.database_config import (
+    DatabaseUrlSource,
+    RuntimeEnvironment,
+    enforce_production_database_policy,
+    reset_database_config_state,
+    resolve_database_url,
+    resolve_runtime_environment,
+    snapshot_environment_before_dotenv,
+)
 from core.env_loader import DotenvLoadResult, load_project_dotenv, resolve_dotenv_path
 from infrastructure.persistence.sql_compat import normalize_dialect
 
@@ -38,6 +47,7 @@ def ensure_dotenv_loaded() -> DotenvLoadResult:
     """Carrega .env uma vez por processo antes de ler variaveis."""
     global _DOTENV_LOADED, _DOTENV_RESULT
     if not _DOTENV_LOADED:
+        snapshot_environment_before_dotenv()
         _DOTENV_RESULT = load_project_dotenv()
         _DOTENV_LOADED = True
     return _DOTENV_RESULT or load_project_dotenv()
@@ -71,6 +81,7 @@ def get_env_bool(name: str, default: bool = False) -> bool:
 
 
 def reset_settings_cache() -> None:
+    reset_database_config_state()
     get_settings.cache_clear()
 
 
@@ -103,6 +114,8 @@ def derive_storage_paths(database_url: str) -> tuple[Path, Path, Path]:
 class AppSettings:
     storage_backend: StorageBackend
     database_url: str
+    database_url_source: DatabaseUrlSource
+    runtime_environment: RuntimeEnvironment
     sqlite_source_url: str | None
     data_root: Path
     pdf_storage_dir: Path
@@ -126,13 +139,22 @@ def get_settings() -> AppSettings:
     except ValueError:
         storage_backend = StorageBackend.SQL
 
-    database_url = str(get_env("MINUTA_DATABASE_URL") or _default_database_url()).strip()
+    runtime_environment = resolve_runtime_environment(minuta_env=get_env("MINUTA_ENV"))
+    database_resolution = resolve_database_url(
+        minuta_database_url=get_env("MINUTA_DATABASE_URL"),
+        dotenv_loaded=dotenv.loaded,
+        runtime_environment=runtime_environment,
+    )
+    enforce_production_database_policy(database_resolution)
+    database_url = database_resolution.database_url
     sqlite_source_url = get_env("MINUTA_SQLITE_SOURCE_URL") or _default_sqlite_source_url()
     data_root, pdf_storage_dir, xml_storage_dir = derive_storage_paths(database_url)
 
     return AppSettings(
         storage_backend=storage_backend,
         database_url=database_url,
+        database_url_source=database_resolution.source,
+        runtime_environment=database_resolution.runtime_environment,
         sqlite_source_url=sqlite_source_url,
         data_root=data_root,
         pdf_storage_dir=pdf_storage_dir,

@@ -6,9 +6,36 @@ import logging
 
 from sqlalchemy.engine import Engine
 
+from core.database_config import DatabaseUrlSource, describe_database_target
 from infrastructure.persistence.sql_compat import normalize_dialect
 
 _LOGGER = logging.getLogger("minuta.persistence.bootstrap")
+
+
+def log_database_resolution(
+    *,
+    runtime_environment: str,
+    database_url_source: str,
+    database_url: str,
+) -> None:
+    target = describe_database_target(database_url)
+    _LOGGER.info(
+        "persistence.database_resolution runtime=%s source=%s dialect=%s driver=%s host=%s database=%s schema=%s",
+        runtime_environment,
+        database_url_source,
+        target["dialect"],
+        target["driver"],
+        target["host"] or "-",
+        target["database"] or "-",
+        target["schema"] or "-",
+    )
+    if database_url_source == DatabaseUrlSource.SQLITE_DEFAULT.value:
+        _LOGGER.warning(
+            "persistence.database_resolution sqlite_fallback_ativo "
+            "runtime=%s database=%s",
+            runtime_environment,
+            target["database"],
+        )
 
 
 def log_engine_configured(engine: Engine) -> None:
