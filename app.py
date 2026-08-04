@@ -43,6 +43,8 @@ from utils.pdf_fonts import register_pdf_fonts as _register_shared_pdf_fonts
 from utils.rota_xml import (
     UNDEFINED_ROUTE_LABEL,
     extract_route_from_inf_cpl,
+    has_concrete_route,
+    is_undefined_route,
     normalize_route_label,
     should_enrich_xml_route,
 )
@@ -1344,8 +1346,36 @@ def process_minuta_inputs(process_clicked: bool, xml_records: list, excel_file) 
         with measure("process.load_excel"):
             excel_base = load_excel_base(excel_file)
         st.session_state["operacional_excel_nome"] = str(getattr(excel_file, "name", "") or "")
+
+        excel_nfs: set[str] = set()
+        if not excel_base.empty and "nf_normalizada" in excel_base.columns:
+            excel_nfs = {
+                normalize_nf(value)
+                for value in excel_base["nf_normalizada"].tolist()
+                if normalize_nf(value)
+            }
+        elif not excel_base.empty and "NF" in excel_base.columns:
+            excel_nfs = {
+                normalize_nf(value)
+                for value in excel_base["NF"].tolist()
+                if normalize_nf(value)
+            }
+
+        with measure("process.enrich_routes_from_xml_storage"):
+            enriched_xml_records, enriched_routes = enrich_xml_records_routes_from_storage(
+                list(xml_records or []),
+                only_nfs=excel_nfs or None,
+                persist=True,
+            )
+        if enriched_routes:
+            st.session_state["runtime_xml_records"] = enriched_xml_records
+            st.info(f"{enriched_routes} rota(s) recuperada(s) a partir dos XMLs armazenados.")
+
         with measure("process.integrate_excel_xml"):
-            processed_df, summary, issues, nf_debug = integrate_excel_with_xml(excel_base, xml_records or [])
+            processed_df, summary, issues, nf_debug = integrate_excel_with_xml(
+                excel_base,
+                enriched_xml_records,
+            )
         st.session_state.processed_df = processed_df
         st.session_state.summary = summary
         st.session_state.issues = issues
@@ -1358,6 +1388,16 @@ def process_minuta_inputs(process_clicked: bool, xml_records: list, excel_file) 
         else:
             with measure("process.analise_operacional"):
                 executar_analise_operacional(processed_df)
+            undefined_routes = 0
+            if "ROTA" in processed_df.columns and not processed_df.empty:
+                undefined_routes = int(
+                    processed_df["ROTA"].map(is_undefined_route).sum()
+                )
+            if undefined_routes and enriched_routes == 0:
+                st.warning(
+                    "Rotas em NÃO DEFINIDA: os XMLs em disco nao puderam ser relidos. "
+                    "Reenvie os arquivos XML do lote e clique em Processar novamente."
+                )
             st.success("Processamento concluido.")
     except ValueError as exc:
         st.session_state.processed_df = create_empty_processed_df()
@@ -2443,6 +2483,126 @@ def persist_xml_records(
     summary["processados"] = summary["novas"] + summary["atualizadas"]
     summary["ignorados"] = summary["ignoradas_separadas"]
     return summary, issues
+
+
+def _read_stored_xml_payload(
+    *,
+    chave_nfe: str,
+    numero_nf: str,
+    docs_by_chave: dict[str, object],
+    docs_by_numero: dict[str, object],
+) -> tuple[bytes, str]:
+    """Lê bytes do XML persistido em documento_xml / disco (xml_storage)."""
+    from infrastructure.database import get_xml_storage_dir
+    from infrastructure.repositories.documento_xml_repository import DocumentoXmlRecord
+
+    doc_service = _get_documento_xml_service()
+    doc = docs_by_chave.get(chave_nfe) if chave_nfe else None
+    if doc is None and numero_nf:
+        doc = docs_by_numero.get(numero_nf)
+
+    filename = "arquivo.xml"
+    payload = b""
+    if isinstance(doc, DocumentoXmlRecord):
+        payload = doc_service.read_xml_bytes(doc)
+        filename = str(doc.nome_arquivo or filename)
+        if not payload and doc.caminho_arquivo:
+            candidate = Path(doc.caminho_arquivo)
+            if candidate.is_file():
+                payload = candidate.read_bytes()
+
+    if not payload and chave_nfe:
+        storage_dir = get_xml_storage_dir()
+        for candidate in (
+            storage_dir / f"{chave_nfe}.xml",
+            storage_dir / "xml_storage" / f"{chave_nfe}.xml",
+        ):
+            if candidate.is_file():
+                payload = candidate.read_bytes()
+                filename = candidate.name
+                break
+
+    return payload, filename
+
+
+def enrich_xml_records_routes_from_storage(
+    xml_records: list[dict[str, object]],
+    *,
+    only_nfs: set[str] | None = None,
+    persist: bool = True,
+) -> tuple[list[dict[str, object]], int]:
+    """
+    Recupera rota a partir do XML em disco quando nota_fiscal.rota está vazia/NÃO DEFINIDA.
+
+    Necessário para Processar Excel-only após deploy: o reimport não é obrigatório
+    se o arquivo físico ainda existir em xml_storage.
+    """
+    from infrastructure.repositories.sql.documento_xml_repository import SqlDocumentoXmlRepository
+    from infrastructure.unit_of_work import UnitOfWork
+
+    if not xml_records:
+        return [], 0
+
+    pending: list[tuple[int, dict[str, object], str, str]] = []
+    for index, record in enumerate(xml_records):
+        serialized = serialize_xml_record(record)
+        if has_concrete_route(serialized.get("ROTA")):
+            continue
+        nf = normalize_nf(serialized.get("nf_normalizada", "") or serialized.get("NF", ""))
+        if only_nfs is not None and nf and nf not in only_nfs:
+            continue
+        chave = normalize_chave_nfe(serialized.get("ChaveNFe", ""))
+        pending.append((index, serialized, chave, nf))
+
+    if not pending:
+        return [serialize_xml_record(item) for item in xml_records], 0
+
+    chaves = sorted({chave for _, _, chave, _ in pending if chave})
+    numeros = sorted({nf for _, _, chave, nf in pending if not chave and nf})
+    with UnitOfWork() as uow:
+        repo = SqlDocumentoXmlRepository(uow.session)
+        docs_by_chave = repo.list_by_chaves(chaves) if chaves else {}
+        docs_by_numero = repo.list_by_numeros_nf(numeros) if numeros else {}
+
+    result = [serialize_xml_record(item) for item in xml_records]
+    delta_records: list[dict[str, object]] = []
+
+    for index, serialized, chave, nf in pending:
+        payload, filename = _read_stored_xml_payload(
+            chave_nfe=chave,
+            numero_nf=nf,
+            docs_by_chave=docs_by_chave,
+            docs_by_numero=docs_by_numero,
+        )
+        if not payload:
+            continue
+
+        parsed = parse_xml_file(StoredXmlUpload(filename, payload))
+        if parsed.get("Erro"):
+            continue
+
+        route = normalize_route_label(parsed.get("ROTA", ""))
+        if not has_concrete_route(route):
+            # fallback direto no infCpl bruto (mesma regra do parser)
+            try:
+                root = ET.fromstring(payload)
+                inf_cpl = find_xml_text_by_localname(root, ["infCpl"]) or xml_text_any_namespace(root, ".//{*}infCpl")
+                route = normalize_route_label(extract_route_from_inf_cpl(inf_cpl))
+            except Exception:
+                continue
+        if not has_concrete_route(route):
+            continue
+
+        enriched = dict(serialized)
+        enriched["ROTA"] = route
+        result[index] = enriched
+        delta_records.append(enriched)
+
+    if persist and delta_records:
+        SqlXmlRecordRepository().upsert_records(delta_records)
+        mark_persistence_layer_stale(reference=True)
+
+    return result, len(delta_records)
 
 
 def import_xml_upload_batch(
