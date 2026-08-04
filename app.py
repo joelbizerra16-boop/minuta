@@ -44,6 +44,7 @@ from utils.rota_xml import (
     UNDEFINED_ROUTE_LABEL,
     extract_route_from_inf_cpl,
     normalize_route_label,
+    should_enrich_xml_route,
 )
 from core.bootstrap import configure_application_storage
 from core.runtime_data_coherence import (
@@ -2319,6 +2320,12 @@ def parse_xml_upload_batch(
             )
             continue
 
+        if should_enrich_xml_route(current_record, serialized):
+            enriched = dict(current_record)
+            enriched["ROTA"] = normalize_route_label(serialized.get("ROTA", ""))
+            batch_lookup[identity] = enriched
+            continue
+
         summary["duplicados_lote"] += 1
         issues.append(f"XML duplicado no lote ignorado: {serialized.get('Arquivo', 'arquivo.xml')}")
 
@@ -2417,6 +2424,13 @@ def persist_xml_records(
             delta_records.append(serialized)
             summary["atualizadas"] += 1
             issues.append(f"NF {serialized.get('NF', '--')} atualizada pelo evento/XML mais recente.")
+        elif should_enrich_xml_route(current_record, serialized):
+            enriched = dict(current_record)
+            enriched["ROTA"] = normalize_route_label(serialized.get("ROTA", ""))
+            storage_lookup[identity] = enriched
+            delta_records.append(enriched)
+            summary["atualizadas"] += 1
+            issues.append(f"NF {serialized.get('NF', '--')} atualizada com rota extraida do XML.")
         else:
             summary["duplicados_armazenamento"] += 1
             summary["duplicados"] += 1

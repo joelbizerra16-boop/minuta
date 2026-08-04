@@ -17,8 +17,33 @@ ROUTE_TRAILING_JUNK_PATTERN = re.compile(r"[\s\-:;=]+$")
 
 
 def normalize_route_label(value: object) -> str:
-    route = re.sub(r"\s+", " ", str(value or "").strip())
-    return route or UNDEFINED_ROUTE_LABEL
+    if value is None:
+        return UNDEFINED_ROUTE_LABEL
+    try:
+        # pandas/numpy NaN é truthy; não pode virar literal "nan"
+        if value != value:  # noqa: PLR0124
+            return UNDEFINED_ROUTE_LABEL
+    except Exception:
+        pass
+    route = re.sub(r"\s+", " ", str(value).strip())
+    if not route or route.casefold() == "nan":
+        return UNDEFINED_ROUTE_LABEL
+    return route
+
+
+def is_undefined_route(value: object) -> bool:
+    """True quando a rota está vazia, ausente ou é o rótulo padrão NÃO DEFINIDA."""
+    route = normalize_route_label(value)
+    return route.casefold() == UNDEFINED_ROUTE_LABEL.casefold()
+
+
+def has_concrete_route(value: object) -> bool:
+    return not is_undefined_route(value)
+
+
+def should_enrich_xml_route(current_record: dict[str, object], new_record: dict[str, object]) -> bool:
+    """Permite atualizar rota válida sobre registro existente sem rota concreta."""
+    return is_undefined_route(current_record.get("ROTA")) and has_concrete_route(new_record.get("ROTA"))
 
 
 def extract_route_from_inf_cpl(inf_cpl: object) -> str:
