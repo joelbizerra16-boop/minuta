@@ -27,8 +27,6 @@ from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.utils import simpleSplit
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Paragraph, Table, TableStyle
 import streamlit as st
@@ -40,6 +38,12 @@ from utils.minuta_carregamento import (
     MINUTA_CARREGAMENTO_CONFIG,
     MINUTA_MODULES,
     MinutaModuleConfig,
+)
+from utils.pdf_fonts import register_pdf_fonts as _register_shared_pdf_fonts
+from utils.rota_xml import (
+    UNDEFINED_ROUTE_LABEL,
+    extract_route_from_inf_cpl,
+    normalize_route_label,
 )
 from core.bootstrap import configure_application_storage
 from core.runtime_data_coherence import (
@@ -133,7 +137,6 @@ def _get_documento_xml_service() -> DocumentoXmlService:
 
 BASE_DIR = Path(__file__).resolve().parent
 FIXED_LOGO_PATH = BASE_DIR / "baixados.png"
-WINDOWS_FONT_DIR = Path("C:/Windows/Fonts")
 DATA_DIR = BASE_DIR / "data"
 XMLS_PROCESSADOS_JSON_PATH = DATA_DIR / "xmls_processados.json"
 CLASSIFICACAO_PRODUTOS_JSON_PATH = DATA_DIR / "classificacao_produtos.json"
@@ -226,13 +229,7 @@ SECTOR_NAME_ALIASES = {
     "NAO CLASSIFICADO": "Não Identificados",
     "SEM SETOR": "Não Identificados",
 }
-UNDEFINED_ROUTE_LABEL = "NÃO DEFINIDA"
 MAX_XML_UPLOAD_BATCH = 2000
-ROUTE_FROM_INF_CPL_PATTERN = re.compile(r"(?im)(?:^|[\s\-])rota\s*:\s*([^\n\r]+)")
-ROUTE_NEXT_FIELD_PATTERN = re.compile(
-    r"\s+-\s+(?:Pedido|Cliente|Vendedor|Trib|Valor|ICMS|CNPJ)\s*:.*$",
-    re.IGNORECASE,
-)
 DEFAULT_PRODUCT_CLASSIFICATION_RULES = [
     {"palavra_chave": "OLEO", "setor": "Lubrificantes"},
     {"palavra_chave": "MOBIL", "setor": "Lubrificantes"},
@@ -319,24 +316,9 @@ _PDF_FONTS_READY = False
 
 def register_pdf_fonts() -> tuple[str, str]:
     global _PDF_FONTS_READY
-    if _PDF_FONTS_READY:
-        if "Arial" in pdfmetrics.getRegisteredFontNames():
-            return "Arial", "Arial-Bold"
-        return PDF_FONT_REGULAR, PDF_FONT_BOLD
-
-    regular_font = WINDOWS_FONT_DIR / "arial.ttf"
-    bold_font = WINDOWS_FONT_DIR / "arialbd.ttf"
-
-    if regular_font.is_file() and bold_font.is_file():
-        if "Arial" not in pdfmetrics.getRegisteredFontNames():
-            pdfmetrics.registerFont(TTFont("Arial", str(regular_font)))
-        if "Arial-Bold" not in pdfmetrics.getRegisteredFontNames():
-            pdfmetrics.registerFont(TTFont("Arial-Bold", str(bold_font)))
-        _PDF_FONTS_READY = True
-        return "Arial", "Arial-Bold"
-
+    regular_font, bold_font = _register_shared_pdf_fonts()
     _PDF_FONTS_READY = True
-    return PDF_FONT_REGULAR, PDF_FONT_BOLD
+    return regular_font, bold_font
 
 
 def get_logo_path() -> Path | None:
@@ -454,25 +436,6 @@ def normalize_sector_name(value: object) -> str:
     if normalized in sector_lookup:
         return sector_lookup[normalized]
     return SECTOR_NAME_ALIASES.get(normalized, "")
-
-
-def normalize_route_label(value: object) -> str:
-    route = re.sub(r"\s+", " ", str(value or "").strip())
-    return route or UNDEFINED_ROUTE_LABEL
-
-
-def extract_route_from_inf_cpl(inf_cpl: object) -> str:
-    text = str(inf_cpl or "").replace("\\n", "\n")
-    if not text.strip():
-        return ""
-
-    match = ROUTE_FROM_INF_CPL_PATTERN.search(text)
-    if not match:
-        return ""
-
-    route_value = match.group(1).strip()
-    route_value = ROUTE_NEXT_FIELD_PATTERN.sub("", route_value).strip()
-    return route_value
 
 
 def ensure_route_column(dataframe: pd.DataFrame) -> pd.DataFrame:
@@ -1533,7 +1496,7 @@ def generate_minuta_pdf(
         pdf.setFont(regular_font, 11)
         pdf.drawString(left_margin, y_pos, f"{subject_label}:   {numero_carga or '--'}")
         y_pos -= 18
-        pdf.drawString(left_margin, y_pos, f"Emissao:   {data_emissao or '--'}")
+        pdf.drawString(left_margin, y_pos, f"Emissão:   {data_emissao or '--'}")
         y_pos -= 16
 
         pdf.setStrokeColor(colors.HexColor("#b8b8b8"))
@@ -1547,7 +1510,7 @@ def generate_minuta_pdf(
         y_pos -= 18
 
         pdf.setFont(bold_font, 11)
-        pdf.drawString(left_margin, y_pos, "VEICULO:")
+        pdf.drawString(left_margin, y_pos, "Veículo:")
         pdf.setFont(regular_font, 11)
         pdf.drawString(left_margin + 70, y_pos, veiculo or "--")
         y_pos -= 18
@@ -1577,7 +1540,7 @@ def generate_minuta_pdf(
         pdf.setFillColor(colors.black)
         pdf.setFont(mono_bold_font, 10)
         pdf.drawString(table_columns["nota"]["x"] + 8, y_pos - 10, "Nota")
-        pdf.drawString(table_columns["emissao"]["x"] + 8, y_pos - 10, "Emissao")
+        pdf.drawString(table_columns["emissao"]["x"] + 8, y_pos - 10, "Emissão")
         pdf.drawString(table_columns["cliente"]["x"] + 8, y_pos - 10, "Cliente")
         pdf.drawRightString(table_columns["vol"]["x"] + table_columns["vol"]["width"] - 12, y_pos - 10, "Vol")
         pdf.drawRightString(table_columns["peso"]["x"] + table_columns["peso"]["width"] - 12, y_pos - 10, "Peso")

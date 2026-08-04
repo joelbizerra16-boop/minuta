@@ -1,49 +1,16 @@
 from io import BytesIO
-from pathlib import Path
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.utils import simpleSplit
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
-WINDOWS_FONT_DIR = Path("C:/Windows/Fonts")
-
-
-_PDF_FONTS_REGISTERED = False
+from utils.pdf_fonts import normalize_pdf_text, register_pdf_fonts
 
 
 def _register_pdf_fonts() -> tuple[str, str]:
-    global _PDF_FONTS_REGISTERED
-    if _PDF_FONTS_REGISTERED:
-        for font_name, bold_name in (
-            ("Calibri", "Calibri-Bold"),
-            ("Segoe UI", "Segoe UI-Bold"),
-            ("Arial", "Arial-Bold"),
-        ):
-            if font_name in pdfmetrics.getRegisteredFontNames():
-                return font_name, bold_name
-        return "Helvetica", "Helvetica-Bold"
-
-    preferred_fonts = [
-        ("Calibri", WINDOWS_FONT_DIR / "calibri.ttf", WINDOWS_FONT_DIR / "calibrib.ttf"),
-        ("Segoe UI", WINDOWS_FONT_DIR / "segoeui.ttf", WINDOWS_FONT_DIR / "segoeuib.ttf"),
-        ("Arial", WINDOWS_FONT_DIR / "arial.ttf", WINDOWS_FONT_DIR / "arialbd.ttf"),
-    ]
-
-    for font_name, regular_font, bold_font in preferred_fonts:
-        if regular_font.is_file() and bold_font.is_file():
-            if font_name not in pdfmetrics.getRegisteredFontNames():
-                pdfmetrics.registerFont(TTFont(font_name, str(regular_font)))
-            bold_font_name = f"{font_name}-Bold"
-            if bold_font_name not in pdfmetrics.getRegisteredFontNames():
-                pdfmetrics.registerFont(TTFont(bold_font_name, str(bold_font)))
-            _PDF_FONTS_REGISTERED = True
-            return font_name, bold_font_name
-
-    _PDF_FONTS_REGISTERED = True
-    return "Helvetica", "Helvetica-Bold"
+    """Compatibilidade com importadores existentes (rastreabilidade)."""
+    return register_pdf_fonts()
 
 
 def _format_currency_br(value: float) -> str:
@@ -77,7 +44,7 @@ def generate_minuta_entrega_pdf(
     operador: str = "",
     impresso_em: str = "",
 ) -> bytes:
-    regular_font, bold_font = _register_pdf_fonts()
+    regular_font, bold_font = register_pdf_fonts()
 
     buffer = BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=landscape(A4))
@@ -110,29 +77,29 @@ def generate_minuta_entrega_pdf(
     }
 
     def wrap_text(text: object, font_name: str, font_size: int, width: float) -> list[str]:
-        lines = simpleSplit(str(text or "--"), font_name, font_size, width)
+        lines = simpleSplit(normalize_pdf_text(text or "--"), font_name, font_size, width)
         return lines or ["--"]
 
     def draw_label_value(x_pos: float, y_pos: float, label: str, value: object, value_offset: float = 74) -> None:
         pdf.setFont(bold_font, 10)
         pdf.setFillColor(colors.black)
-        pdf.drawString(x_pos, y_pos, label)
+        pdf.drawString(x_pos, y_pos, normalize_pdf_text(label))
         pdf.setFont(regular_font, 10)
-        pdf.drawString(x_pos + value_offset, y_pos, str(value or "--"))
+        pdf.drawString(x_pos + value_offset, y_pos, normalize_pdf_text(value or "--"))
 
     def draw_header(continuation: bool = False) -> float:
         y_pos = top_margin
         pdf.setFillColor(colors.black)
         pdf.setFont(bold_font, 15 if not continuation else 13)
-        pdf.drawString(left_margin, y_pos, empresa)
-        pdf.drawRightString(right_margin, y_pos, document_title)
+        pdf.drawString(left_margin, y_pos, normalize_pdf_text(empresa))
+        pdf.drawRightString(right_margin, y_pos, normalize_pdf_text(document_title))
 
         pdf.setFillColor(text_muted)
         pdf.setFont(regular_font, 10)
         second_line_y = y_pos - 22
-        pdf.drawString(left_margin, second_line_y, f"Emiss├úo: {data_emissao or '--'}")
+        pdf.drawString(left_margin, second_line_y, f"Emissão: {data_emissao or '--'}")
         pdf.drawString(left_margin + 220, second_line_y, f"{subject_label}: {numero_documento or '--'}")
-        pdf.drawRightString(right_margin, second_line_y, f"P├ígina: {pdf.getPageNumber()}")
+        pdf.drawRightString(right_margin, second_line_y, f"Página: {pdf.getPageNumber()}")
 
         line_y = second_line_y - 10
         pdf.setStrokeColor(light_line)
@@ -153,7 +120,7 @@ def generate_minuta_entrega_pdf(
         col_2_x = left_margin + 390
 
         draw_label_value(col_1_x, row_one_y, "Transportadora", transportadora, 95)
-        draw_label_value(col_2_x, row_one_y, "Ve├¡culo", veiculo or "--", 54)
+        draw_label_value(col_2_x, row_one_y, "Veículo", veiculo or "--", 54)
         draw_label_value(col_1_x, row_two_y, "Placa", placa_value, 40)
         draw_label_value(col_2_x, row_two_y, "Motorista", motorista_value, 62)
         return y_pos - block_height - section_gap
@@ -166,7 +133,7 @@ def generate_minuta_entrega_pdf(
         pdf.setFont(bold_font, 10)
         pdf.drawString(columns["nota"]["x"] + 8, y_pos - 15, "NF")
         pdf.drawString(columns["item"]["x"] + 8, y_pos - 15, "Vol")
-        pdf.drawString(columns["emissao"]["x"] + 8, y_pos - 15, "Emiss├úo")
+        pdf.drawString(columns["emissao"]["x"] + 8, y_pos - 15, "Emissão")
         pdf.drawString(columns["cliente"]["x"] + 8, y_pos - 15, "Cliente")
         pdf.drawString(columns["cidade"]["x"] + 8, y_pos - 15, "Cidade")
         pdf.drawString(columns["uf"]["x"] + 8, y_pos - 15, "UF")
@@ -211,22 +178,34 @@ def generate_minuta_entrega_pdf(
         pdf.line(left_margin, current_y - row_height, right_margin, current_y - row_height)
         pdf.setFillColor(colors.black)
         pdf.setFont(regular_font, 10)
-        pdf.drawString(columns["nota"]["x"] + 8, row_top - 10, str(record.get("nota", "--") or "--"))
-        pdf.drawRightString(columns["item"]["x"] + columns["item"]["width"] - 8, row_top - 10, _format_volume_br(float(record.get("item", record.get("volume", 0.0)) or 0.0)))
-        pdf.drawString(columns["emissao"]["x"] + 8, row_top - 10, str(record.get("data", "--") or "--"))
+        pdf.drawString(columns["nota"]["x"] + 8, row_top - 10, normalize_pdf_text(record.get("nota", "--") or "--"))
+        pdf.drawRightString(
+            columns["item"]["x"] + columns["item"]["width"] - 8,
+            row_top - 10,
+            _format_volume_br(float(record.get("item", record.get("volume", 0.0)) or 0.0)),
+        )
+        pdf.drawString(columns["emissao"]["x"] + 8, row_top - 10, normalize_pdf_text(record.get("data", "--") or "--"))
 
-        for index, line in enumerate(cliente_lines):
+        for line_index, line in enumerate(cliente_lines):
             pdf.setFont(regular_font, 9)
-            pdf.drawString(columns["cliente"]["x"] + 8, row_top - 10 - (index * line_height), line)
+            pdf.drawString(columns["cliente"]["x"] + 8, row_top - 10 - (line_index * line_height), line)
 
-        for index, line in enumerate(cidade_lines):
+        for line_index, line in enumerate(cidade_lines):
             pdf.setFont(regular_font, 9)
-            pdf.drawString(columns["cidade"]["x"] + 8, row_top - 10 - (index * line_height), line)
+            pdf.drawString(columns["cidade"]["x"] + 8, row_top - 10 - (line_index * line_height), line)
 
         pdf.setFont(regular_font, 10)
-        pdf.drawString(columns["uf"]["x"] + 8, row_top - 10, str(record.get("uf", "--") or "--"))
-        pdf.drawRightString(columns["peso"]["x"] + columns["peso"]["width"] - 8, row_top - 10, _format_weight_br(float(record.get("peso", 0.0) or 0.0)))
-        pdf.drawRightString(columns["valor"]["x"] + columns["valor"]["width"] - 8, row_top - 10, _format_currency_br(float(record.get("valor", 0.0) or 0.0)))
+        pdf.drawString(columns["uf"]["x"] + 8, row_top - 10, normalize_pdf_text(record.get("uf", "--") or "--"))
+        pdf.drawRightString(
+            columns["peso"]["x"] + columns["peso"]["width"] - 8,
+            row_top - 10,
+            _format_weight_br(float(record.get("peso", 0.0) or 0.0)),
+        )
+        pdf.drawRightString(
+            columns["valor"]["x"] + columns["valor"]["width"] - 8,
+            row_top - 10,
+            _format_currency_br(float(record.get("valor", 0.0) or 0.0)),
+        )
 
         current_y -= row_height
 
@@ -255,7 +234,7 @@ def generate_minuta_entrega_pdf(
     pdf.setFont(regular_font, 10)
     pdf.drawString(left_margin + 392, current_y, "_____:_____")
     pdf.setFont(bold_font, 10)
-    pdf.drawString(left_margin + 508, current_y, "HORA DA SAIDA:")
+    pdf.drawString(left_margin + 508, current_y, "HORA DA SAÍDA:")
     pdf.setFont(regular_font, 10)
     pdf.drawString(left_margin + 606, current_y, "_____:_____")
 
@@ -265,13 +244,13 @@ def generate_minuta_entrega_pdf(
     pdf.drawString(
         left_margin,
         current_y,
-        "OBS: O PAGAMENTO DO VALOR DO FRETE NO PRAZO COMBINADO ESTARA AUTOMATICAMENTE VINCULADO AO RETORNO DO",
+        "OBS: O PAGAMENTO DO VALOR DO FRETE NO PRAZO COMBINADO ESTARÁ AUTOMATICAMENTE VINCULADO AO RETORNO DO",
     )
     current_y -= 10
     pdf.drawString(
         left_margin,
         current_y,
-        "CANHOTO DA NOTA FISCAL E CABECALHO DO BOLETO BANCARIO DEVIDAMENTE ASSINADO E CARIMBADO PELO CLIENTE.",
+        "CANHOTO DA NOTA FISCAL E CABEÇALHO DO BOLETO BANCÁRIO DEVIDAMENTE ASSINADO E CARIMBADO PELO CLIENTE.",
     )
 
     current_y -= 26
@@ -292,7 +271,7 @@ def generate_minuta_entrega_pdf(
     pdf.drawString(
         left_margin,
         current_y,
-        "DECLARO ESTAR RETIRANDO AS MERCADORIAS REFERENTES AS NOTAS FISCAIS CONSTANTES NESTE DOCUMENTO EM PERFEITO ESTADO.",
+        "DECLARO ESTAR RETIRANDO AS MERCADORIAS REFERENTES ÀS NOTAS FISCAIS CONSTANTES NESTE DOCUMENTO EM PERFEITO ESTADO.",
     )
 
     from auth.security.session import OPERADOR_NAO_IDENTIFICADO
@@ -305,8 +284,8 @@ def generate_minuta_entrega_pdf(
         impresso_label = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     pdf.setFont(regular_font, 8)
     pdf.setFillColor(text_muted)
-    pdf.drawString(left_margin, bottom_margin + 2, f"Operador: {operador_label}")
-    pdf.drawString(left_margin, bottom_margin - 10, f"Impresso em: {impresso_label}")
+    pdf.drawString(left_margin, bottom_margin + 2, f"Operador: {normalize_pdf_text(operador_label)}")
+    pdf.drawString(left_margin, bottom_margin - 10, f"Impresso em: {normalize_pdf_text(impresso_label)}")
 
     pdf.save()
     buffer.seek(0)

@@ -10,7 +10,8 @@ from reportlab.pdfgen import canvas
 
 from carregamentos.models.rastreabilidade_nf import RastreabilidadeNfRelatorio
 from ui.assets import get_brand_logo_path
-from utils.gerador_minuta import _format_weight_br, _register_pdf_fonts
+from utils.gerador_minuta import _format_weight_br
+from utils.pdf_fonts import register_pdf_fonts as _register_pdf_fonts
 
 DOCUMENT_TITLE = "RELATORIO DE RASTREABILIDADE DA NOTA FISCAL"
 HEADER_LEFT_WIDTH = 148.0
@@ -74,7 +75,7 @@ def generate_rastreabilidade_nf_pdf(relatorio: RastreabilidadeNfRelatorio) -> by
     emitido_local = relatorio.emitido_em.astimezone(timezone.utc)
     emitido_data = emitido_local.strftime("%d/%m/%Y")
     emitido_hora = emitido_local.strftime("%H:%M")
-    emitido_label = f"Emissao: {emitido_data} {emitido_hora}"
+    emitido_label = f"Emissão: {emitido_data} {emitido_hora}"
 
     state = {"page_footer_user": relatorio.emitido_por or "--"}
 
@@ -91,7 +92,7 @@ def generate_rastreabilidade_nf_pdf(relatorio: RastreabilidadeNfRelatorio) -> by
         pdf.drawRightString(
             right_margin,
             footer_y,
-            f"{state['page_footer_user']} | {emitido_data} {emitido_hora} | Pagina {pdf.getPageNumber()}",
+            f"{state['page_footer_user']} | {emitido_data} {emitido_hora} | Página {pdf.getPageNumber()}",
         )
 
     def _draw_left_region(top_y: float) -> float:
@@ -155,7 +156,7 @@ def generate_rastreabilidade_nf_pdf(relatorio: RastreabilidadeNfRelatorio) -> by
             pdf.setFont(bold_font, label_size)
             pdf.drawRightString(right_col_x, y_cursor, f"{label}:")
             y_cursor -= gap
-            pdf.setFillColor(text_muted if label == "Pagina" else colors.black)
+            pdf.setFillColor(text_muted if label == "Página" else colors.black)
             pdf.setFont(regular_font, value_size)
             if store_coords:
                 pdf._page_number_coords = (right_col_x, y_cursor)
@@ -164,9 +165,9 @@ def generate_rastreabilidade_nf_pdf(relatorio: RastreabilidadeNfRelatorio) -> by
                 pdf.drawRightString(right_col_x, y_cursor, value)
             y_cursor -= gap + block_gap
 
-        draw_labeled_block("Usuario", relatorio.emitido_por or "--")
+        draw_labeled_block("Usuário", relatorio.emitido_por or "--")
         draw_labeled_block("NF", str(relatorio.resumo.numero_nf))
-        draw_labeled_block("Pagina", "", store_coords=True)
+        draw_labeled_block("Página", "", store_coords=True)
         return y_cursor
 
     def draw_header() -> float:
@@ -301,9 +302,9 @@ def generate_rastreabilidade_nf_pdf(relatorio: RastreabilidadeNfRelatorio) -> by
         "Carregamento",
         "Modalidade",
         "Status",
-        "Usuario",
+        "Usuário",
         "Motorista",
-        "Veiculo",
+        "Veículo",
         "Placa",
         "Rota",
         "PDF",
@@ -336,15 +337,15 @@ def generate_rastreabilidade_nf_pdf(relatorio: RastreabilidadeNfRelatorio) -> by
         current_y = draw_section_title(current_y, "REENTREGAS")
         current_y = draw_table(
             current_y,
-            ["Data", "Carregamento", "Usuario", "Motivo", "Status"],
+            ["Data", "Carregamento", "Usuário", "Motivo", "Status"],
             [[item.data, item.carregamento, item.usuario, item.motivo, item.status] for item in relatorio.reentregas],
             widths=[70, 80, 70, 180, 70],
         )
 
-    current_y = draw_section_title(current_y, "VEICULOS UTILIZADOS")
+    current_y = draw_section_title(current_y, "VEÍCULOS UTILIZADOS")
     current_y = draw_table(
         current_y,
-        ["Veiculo", "Placa", "Qtd. viagens", "Motorista"],
+        ["Veículo", "Placa", "Qtd. viagens", "Motorista"],
         [
             [item.veiculo, item.placa, str(item.quantidade_viagens), item.motorista]
             for item in relatorio.veiculos
@@ -400,9 +401,9 @@ def generate_rastreabilidade_nf_pdf(relatorio: RastreabilidadeNfRelatorio) -> by
                 ("Peso expedido", _format_weight_br(stats.peso_expedido)),
                 ("Reentregas", str(stats.total_reentregas)),
                 ("Retiradas em balcao", str(stats.total_balcao)),
-                ("Veiculos diferentes", str(stats.veiculos_diferentes)),
+                ("Veículos diferentes", str(stats.veiculos_diferentes)),
                 ("Motoristas diferentes", str(stats.motoristas_diferentes)),
-                ("Usuarios envolvidos", str(stats.usuarios_envolvidos)),
+                ("Usuários envolvidos", str(stats.usuarios_envolvidos)),
             ],
         )
 
