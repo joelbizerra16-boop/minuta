@@ -2447,12 +2447,23 @@ def persist_xml_records(
         if not identity:
             continue
 
+        current_record = storage_lookup.get(identity)
         if identity in locked_identities:
+            if current_record is not None and should_enrich_xml_route(current_record, serialized):
+                enriched = dict(current_record)
+                enriched["ROTA"] = normalize_route_label(serialized.get("ROTA", ""))
+                storage_lookup[identity] = enriched
+                delta_records.append(enriched)
+                summary["atualizadas"] += 1
+                issues.append(
+                    f"NF {serialized.get('NF', '--')} atualizada somente com a rota extraida do XML; "
+                    "dados da separacao preservados."
+                )
+                continue
             issues.append(f"NF {serialized.get('NF', '--')} ignorada no upload porque ja esta separada.")
             summary["ignoradas_separadas"] += 1
             continue
 
-        current_record = storage_lookup.get(identity)
         if current_record is None:
             storage_lookup[identity] = serialized
             delta_records.append(serialized)

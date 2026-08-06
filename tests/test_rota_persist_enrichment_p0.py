@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -114,6 +115,70 @@ def test_persist_does_not_overwrite_existing_concrete_route(xml_env: SqlXmlRecor
     assert summary["atualizadas"] == 0
     assert summary["duplicados_armazenamento"] == 1
     assert xml_env.list_all_records()[0]["ROTA"] == "R01"
+
+
+def test_persist_enriches_route_for_locked_nf_and_preserves_operational_data(
+    xml_env: SqlXmlRecordRepository,
+) -> None:
+    from app import persist_xml_records, serialize_xml_record
+
+    old = serialize_xml_record(_base_record(rota="", arquivo="old.xml"))
+    xml_env.upsert_records([old])
+
+    locked_separation = {
+        "NF": old["NF"],
+        "Chave": old["ChaveNFe"],
+        "Cliente": old["Destinatario"],
+        "Rota": UNDEFINED_ROUTE_LABEL,
+        "Status": "Separado",
+        "Lote": "000220",
+    }
+    new = serialize_xml_record(_base_record(rota="MAIRIPORA", arquivo="reimport.xml"))
+    new["Destinatario"] = "CLIENTE QUE NAO DEVE SUBSTITUIR O REGISTRO BLOQUEADO"
+
+    with patch("app.carregar_separacao_json", return_value=([locked_separation], "")):
+        summary, issues = persist_xml_records(
+            [new],
+            {"total_arquivos": 1, "erros": 0, "duplicados_lote": 0},
+            [],
+        )
+
+    assert summary["atualizadas"] == 1
+    assert summary["ignoradas_separadas"] == 0
+    assert summary["processados"] == 1
+    assert any("somente com a rota" in issue.lower() for issue in issues)
+
+    loaded = xml_env.list_all_records()[0]
+    assert loaded["ROTA"] == "MAIRIPORA"
+    assert loaded["Destinatario"] == old["Destinatario"]
+    assert loaded["Arquivo"] == old["Arquivo"]
+
+
+@pytest.mark.parametrize(
+    ("nf", "inf_cpl"),
+    [
+        (
+            "1436867",
+            "Vendedor Rinaldo Ricardo Santos Pedido 28719 Cliente C015265 "
+            "Rota MAIRIPORA\\nTrib aprox R19631 Fed 36488 Est e 000 Mun",
+        ),
+        (
+            "1436745",
+            "Vendedor Jefferson Oliveira Pedido 28596 Cliente C005743 "
+            "Rota MAIRIPORA\\nTrib aprox R30937 Fed 57504 Est e 000 Mun",
+        ),
+        (
+            "1436712",
+            "Vendedor Jefferson Oliveira Pedido 28546 Cliente C004016 "
+            "Rota MAIRIPORA\\nTrib aprox R252846 Fed 469975 Est e 000 Mun",
+        ),
+    ],
+)
+def test_routes_from_reported_xmls_are_recognized(nf: str, inf_cpl: str) -> None:
+    from utils.rota_xml import extract_route_from_inf_cpl
+
+    assert nf
+    assert extract_route_from_inf_cpl(inf_cpl) == "MAIRIPORA"
 
 
 def test_batch_dedup_enriches_route_from_later_file() -> None:

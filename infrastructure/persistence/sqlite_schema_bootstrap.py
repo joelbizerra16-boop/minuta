@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from sqlalchemy import MetaData, text
+from sqlalchemy import MetaData, inspect, text
 from sqlalchemy.engine import Engine
 
 _LOGGER = logging.getLogger("minuta.persistence.sqlite_schema")
@@ -50,6 +50,11 @@ def apply_sqlite_schema(engine: Engine, metadata: MetaData) -> None:
             connection.execute(text("BEGIN IMMEDIATE"))
             try:
                 metadata.create_all(bind=connection, checkfirst=True)
+                inspector = inspect(connection)
+                if "documento_xml" in inspector.get_table_names():
+                    columns = {column["name"] for column in inspector.get_columns("documento_xml")}
+                    if "conteudo_xml" not in columns:
+                        connection.execute(text("ALTER TABLE documento_xml ADD COLUMN conteudo_xml BLOB"))
             except Exception:
                 connection.rollback()
                 raise

@@ -4,7 +4,7 @@ import hashlib
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -115,9 +115,16 @@ class DocumentoXmlService:
         reused = 0
         failures = 0
         disk_writes = 0
+        disk_available = True
 
         try:
             self._storage_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            disk_available = False
+            issues.append(f"Copia local de XML indisponivel; persistencia no banco mantida: {exc}")
+            logger.warning("Diretorio local de XML indisponivel %s: %s", self._storage_dir, exc)
+
+        try:
             with UnitOfWork() as uow:
                 repo = SqlDocumentoXmlRepository(uow.session)
                 chaves = [chave for _, chave, _, _, _ in prepared]
@@ -127,6 +134,25 @@ class DocumentoXmlService:
                     relative_path = f"xml_storage/{chave_nfe}.xml"
                     existing = existing_by_chave.get(chave_nfe)
                     if existing is not None and existing.hash_sha256 == file_hash:
+                        if not existing.conteudo_xml:
+                            saved_record = repo.save(
+                                replace(
+                                    existing,
+                                    tamanho=len(item.file_bytes),
+                                    conteudo_xml=bytes(item.file_bytes),
+                                )
+                            )
+                            existing_by_chave[chave_nfe] = saved_record
+                            saved += 1
+                            results.append(
+                                PersistXmlResult(status="saved", chave_nfe=chave_nfe, hash_sha256=file_hash)
+                            )
+                            logger.info(
+                                "XML legado preenchido no banco chave=%s hash=%s",
+                                chave_nfe,
+                                file_hash[:12],
+                            )
+                            continue
                         reused += 1
                         results.append(
                             PersistXmlResult(status="reused", chave_nfe=chave_nfe, hash_sha256=file_hash)
@@ -139,16 +165,18 @@ class DocumentoXmlService:
                         )
                         continue
 
-                    absolute_path = self._storage_dir / f"{chave_nfe}.xml"
-                    try:
-                        if not absolute_path.is_file() or existing is None or existing.hash_sha256 != file_hash:
-                            absolute_path.write_bytes(item.file_bytes)
-                            disk_writes += 1
-                    except OSError as exc:
-                        failures += 1
-                        issues.append(f"Falha ao gravar XML em disco ({item.original_filename}): {exc}")
-                        logger.warning("Falha ao gravar XML em disco %s: %s", item.original_filename, exc)
-                        continue
+                    if disk_available:
+                        absolute_path = self._storage_dir / f"{chave_nfe}.xml"
+                        try:
+                            if not absolute_path.is_file() or existing is None or existing.hash_sha256 != file_hash:
+                                absolute_path.write_bytes(item.file_bytes)
+                                disk_writes += 1
+                        except OSError as exc:
+                            disk_available = False
+                            issues.append(
+                                f"XML salvo no banco, mas a copia local falhou ({item.original_filename}): {exc}"
+                            )
+                            logger.warning("Falha na copia local do XML %s: %s", item.original_filename, exc)
 
                     record = DocumentoXmlRecord(
                         id=int(existing.id) if existing else 0,
@@ -161,6 +189,7 @@ class DocumentoXmlService:
                         usuario_id=usuario_id,
                         data_importacao=datetime.now(timezone.utc),
                         ativo=True,
+                        conteudo_xml=bytes(item.file_bytes),
                     )
                     saved_record = repo.save(record)
                     existing_by_chave[chave_nfe] = saved_record
@@ -204,14 +233,41 @@ class DocumentoXmlService:
         )
 
     def read_xml_bytes(self, record: DocumentoXmlRecord) -> bytes:
+        if record.conteudo_xml:
+            return bytes(record.conteudo_xml)
+
         candidates = [
             self._storage_dir / f"{record.chave_nfe}.xml",
             self._storage_dir / Path(record.caminho_arquivo).name,
         ]
         for candidate in candidates:
             if candidate.is_file():
-                return candidate.read_bytes()
+                payload = candidate.read_bytes()
+                self._backfill_database_content(record, payload)
+                return payload
         return b""
+
+    @staticmethod
+    def _backfill_database_content(record: DocumentoXmlRecord, payload: bytes) -> None:
+        if not payload or record.conteudo_xml:
+            return
+        try:
+            with UnitOfWork() as uow:
+                repo = SqlDocumentoXmlRepository(uow.session)
+                repo.save(
+                    replace(
+                        record,
+                        tamanho=len(payload),
+                        conteudo_xml=bytes(payload),
+                    )
+                )
+                uow.session.flush()
+        except Exception as exc:
+            logger.warning(
+                "Falha ao preencher XML legado no banco chave=%s: %s",
+                record.chave_nfe,
+                exc,
+            )
 
 
 def _sanitize_export_filename(original_filename: str, chave_nfe: str, numero_nf: str) -> str:

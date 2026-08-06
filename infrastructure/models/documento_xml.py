@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, CHAR, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import Boolean, CHAR, DateTime, ForeignKey, Index, Integer, LargeBinary, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from infrastructure.models.base import Base
@@ -28,6 +28,7 @@ class DocumentoXmlORM(Base):
     caminho_arquivo: Mapped[str] = mapped_column(String(500), nullable=False)
     hash_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     tamanho: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    conteudo_xml: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     usuario_id: Mapped[int | None] = mapped_column(
         ForeignKey("usuario.id", ondelete=ON_DELETE_SET_NULL, onupdate="CASCADE"),
         nullable=True,

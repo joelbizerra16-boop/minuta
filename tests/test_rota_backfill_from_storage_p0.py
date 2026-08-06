@@ -116,3 +116,47 @@ def test_enrich_skips_when_file_missing(xml_env) -> None:
     enriched, count = enrich_xml_records_routes_from_storage(repo.list_all_records(), persist=True)
     assert count == 0
     assert enriched[0]["ROTA"] == "NÃO DEFINIDA"
+
+
+def test_enrich_route_from_database_xml_after_local_file_loss(xml_env) -> None:
+    from app import enrich_xml_records_routes_from_storage, serialize_xml_record
+    from infrastructure.services.documento_xml_service import DocumentoXmlService
+
+    repo, xml_dir = xml_env
+    payload = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <nfeProc>
+      <NFe><infNFe><ide><nNF>{NF}</nNF></ide>
+        <dest><xNome>CLIENTE</xNome><enderDest><xMun>MAIRIPORA</xMun><UF>SP</UF></enderDest></dest>
+        <infAdic><infCpl>Cliente C015265 Rota MAIRIPORA\\nTrib aprox</infCpl></infAdic>
+      </infNFe></NFe>
+      <protNFe><infProt><chNFe>{CHAVE}</chNFe><cStat>100</cStat><xMotivo>Autorizado o uso da NF-e</xMotivo></infProt></protNFe>
+    </nfeProc>""".encode("utf-8")
+
+    stale = serialize_xml_record(
+        {
+            "NF": NF,
+            "nf_normalizada": NF,
+            "ChaveNFe": CHAVE,
+            "Destinatario": "CLIENTE",
+            "Municipio": "MAIRIPORA",
+            "UF": "SP",
+            "StatusNF": "Autorizado o uso da NF-e",
+            "ROTA": "",
+            "Items": [],
+            "Arquivo": "legacy.xml",
+            "TipoXML": "normal",
+            "Erro": False,
+        }
+    )
+    repo.upsert_records([stale])
+    DocumentoXmlService(storage_dir=xml_dir).persist_raw_xml(
+        payload,
+        original_filename="legacy.xml",
+        chave_nfe=CHAVE,
+    )
+    (xml_dir / f"{CHAVE}.xml").unlink()
+
+    enriched, count = enrich_xml_records_routes_from_storage(repo.list_all_records(), persist=True)
+    assert count == 1
+    assert enriched[0]["ROTA"] == "MAIRIPORA"
+    assert repo.list_all_records()[0]["ROTA"] == "MAIRIPORA"

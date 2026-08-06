@@ -17,6 +17,7 @@ class DocumentoXmlRecord:
     usuario_id: int | None
     data_importacao: datetime
     ativo: bool
+    conteudo_xml: bytes | None = None
 
 
 class DocumentoXmlRepository(Protocol):

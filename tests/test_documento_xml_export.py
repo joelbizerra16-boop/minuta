@@ -107,6 +107,68 @@ def test_persist_xml_dedup_by_hash(xml_env: Path) -> None:
     assert len(list(xml_env.glob("*.xml"))) == 1
 
 
+def test_xml_content_survives_local_file_loss(xml_env: Path) -> None:
+    from infrastructure.repositories.sql.documento_xml_repository import SqlDocumentoXmlRepository
+    from infrastructure.unit_of_work import UnitOfWork
+
+    service = DocumentoXmlService(storage_dir=xml_env)
+    payload = _sample_xml(CHAVE)
+    result = service.persist_raw_xml(payload, original_filename="NF1426799.xml", usuario_id=1)
+    assert result is not None and result.status == "saved"
+
+    with UnitOfWork() as uow:
+        record = SqlDocumentoXmlRepository(uow.session).get_by_chave(CHAVE)
+    assert record is not None
+    assert record.conteudo_xml == payload
+
+    (xml_env / f"{CHAVE}.xml").unlink()
+    assert service.read_xml_bytes(record) == payload
+
+
+def test_database_persistence_does_not_depend_on_local_disk(xml_env: Path) -> None:
+    from infrastructure.repositories.sql.documento_xml_repository import SqlDocumentoXmlRepository
+    from infrastructure.unit_of_work import UnitOfWork
+
+    blocked_storage = xml_env.parent / "storage_is_a_file"
+    blocked_storage.write_bytes(b"not-a-directory")
+    service = DocumentoXmlService(storage_dir=blocked_storage)
+    payload = _sample_xml(CHAVE)
+
+    result = service.persist_raw_xml(payload, original_filename="NF1426799.xml", usuario_id=1)
+    assert result is not None and result.status == "saved"
+
+    with UnitOfWork() as uow:
+        record = SqlDocumentoXmlRepository(uow.session).get_by_chave(CHAVE)
+    assert record is not None
+    assert record.conteudo_xml == payload
+    assert service.read_xml_bytes(record) == payload
+
+
+def test_reading_legacy_disk_xml_backfills_database(xml_env: Path) -> None:
+    from infrastructure.models.documento_xml import DocumentoXmlORM
+    from infrastructure.repositories.sql.documento_xml_repository import SqlDocumentoXmlRepository
+    from infrastructure.unit_of_work import UnitOfWork
+
+    service = DocumentoXmlService(storage_dir=xml_env)
+    payload = _sample_xml(CHAVE)
+    service.persist_raw_xml(payload, original_filename="NF1426799.xml", usuario_id=1)
+
+    with UnitOfWork() as uow:
+        row = uow.session.query(DocumentoXmlORM).filter_by(chave_nfe=CHAVE).one()
+        row.conteudo_xml = None
+
+    with UnitOfWork() as uow:
+        legacy_record = SqlDocumentoXmlRepository(uow.session).get_by_chave(CHAVE)
+    assert legacy_record is not None and legacy_record.conteudo_xml is None
+    assert service.read_xml_bytes(legacy_record) == payload
+
+    (xml_env / f"{CHAVE}.xml").unlink()
+    with UnitOfWork() as uow:
+        durable_record = SqlDocumentoXmlRepository(uow.session).get_by_chave(CHAVE)
+    assert durable_record is not None and durable_record.conteudo_xml == payload
+    assert service.read_xml_bytes(durable_record) == payload
+
+
 def test_persist_xml_single_physical_file_for_same_chave(xml_env: Path) -> None:
     service = DocumentoXmlService(storage_dir=xml_env)
     payload_a = _sample_xml(CHAVE, "1426799")

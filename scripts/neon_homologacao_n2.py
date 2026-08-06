@@ -52,13 +52,14 @@ DOMAIN_TABLES = frozenset(
     }
 )
 
-EXPECTED_HEAD_REVISION = "m5_0005_operational_tables"
+EXPECTED_HEAD_REVISION = "m6_0006_documento_xml_conteudo"
 MIGRATION_REVISIONS = (
     "m1_0001_perfil_usuario",
     "m2_0002_schema_operacional",
     "m3_0003_integer_surrogate_keys",
     "m4_0004_documento_xml",
     "m5_0005_operational_tables",
+    "m6_0006_documento_xml_conteudo",
 )
 
 _LOGGER = logging.getLogger("minuta.neon_homologacao_n2")

@@ -84,6 +84,8 @@ class SqlDocumentoXmlRepository(DocumentoXmlRepository):
         row.caminho_arquivo = record.caminho_arquivo
         row.hash_sha256 = record.hash_sha256
         row.tamanho = int(record.tamanho)
+        if record.conteudo_xml is not None:
+            row.conteudo_xml = bytes(record.conteudo_xml)
         row.usuario_id = record.usuario_id
         row.ativo = bool(record.ativo)
         return self._to_record(row)
@@ -101,4 +103,5 @@ class SqlDocumentoXmlRepository(DocumentoXmlRepository):
             usuario_id=int(row.usuario_id) if row.usuario_id is not None else None,
             data_importacao=row.data_importacao,
             ativo=bool(row.ativo),
+            conteudo_xml=bytes(row.conteudo_xml) if row.conteudo_xml is not None else None,
         )

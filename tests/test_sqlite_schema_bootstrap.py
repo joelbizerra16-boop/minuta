@@ -115,6 +115,38 @@ def test_sqlite_bootstrap_existing_database() -> None:
             _dispose_configured_engine()
 
 
+def test_sqlite_bootstrap_adds_xml_content_to_legacy_table() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        db_path = Path(tmp_dir) / "legacy_documento_xml.db"
+        connection = sqlite3.connect(db_path)
+        connection.execute(
+            """
+            CREATE TABLE documento_xml (
+                id INTEGER PRIMARY KEY,
+                chave_nfe CHAR(44) NOT NULL,
+                numero_nf VARCHAR(20) NOT NULL,
+                nome_arquivo VARCHAR(255) NOT NULL,
+                caminho_arquivo VARCHAR(500) NOT NULL,
+                hash_sha256 VARCHAR(64) NOT NULL,
+                tamanho INTEGER NOT NULL DEFAULT 0,
+                usuario_id INTEGER,
+                data_importacao DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                ativo BOOLEAN NOT NULL DEFAULT 1
+            )
+            """
+        )
+        connection.commit()
+        connection.close()
+
+        _configure_sqlite(db_path)
+        try:
+            ensure_full_schema()
+            columns = {column["name"] for column in inspect(get_engine()).get_columns("documento_xml")}
+            assert "conteudo_xml" in columns
+        finally:
+            _dispose_configured_engine()
+
+
 def test_sqlite_bootstrap_consecutive_calls_are_idempotent() -> None:
     with _sqlite_test_database("consecutive.db") as db_path:
         for _ in range(3):

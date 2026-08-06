@@ -119,7 +119,7 @@ def etapa1_auditoria() -> dict[str, Any]:
         "engine_unico": "infrastructure/database.py::configure_database + get_engine",
         "unit_of_work": "infrastructure/unit_of_work.py",
         "database_usage_pg": "pg_database_size(current_database())",
-        "alembic_head": "m5_0005_operational_tables",
+        "alembic_head": "m6_0006_documento_xml_conteudo",
         "psycopg2": "requirements.txt::psycopg2-binary",
         "dotenv": ".env via scripts (nao em runtime obrigatorio)",
     }
@@ -229,13 +229,13 @@ def etapa3_migrations(postgres_url: str) -> dict[str, Any]:
     return {
         "duracao_ms": elapsed,
         "revision": str(revision or ""),
-        "head_esperado": "m5_0005_operational_tables",
-        "head_ok": str(revision or "") == "m5_0005_operational_tables",
+        "head_esperado": "m6_0006_documento_xml_conteudo",
+        "head_ok": str(revision or "") == "m6_0006_documento_xml_conteudo",
         "tabelas": sorted(tables & set(DOMAIN_TABLES) | {"alembic_version"}),
         "tabelas_ausentes": missing,
         "fk_count": int(fk_count or 0),
         "index_count": int(idx_count or 0),
-        "ok": len(missing) == 0 and str(revision or "") == "m5_0005_operational_tables",
+        "ok": len(missing) == 0 and str(revision or "") == "m6_0006_documento_xml_conteudo",
     }
 
 
